@@ -1,6 +1,3 @@
-import pyspark
-print("PySpark Version:", pyspark.__version__)
-
 from pyspark.sql import SparkSession
 from .extract import extract_data
 from .transform import transform_data
@@ -43,8 +40,14 @@ def run():
         print("Data transformed successfully:")
         transformed_df.show(5)
 
-        # Categorize URLs
-        categorized_df = categorize_urls(transformed_df)
+        # Categorize URLs using Pandas then back to Spark DataFrame
+        categorized_pd_df = categorize_urls(transformed_df.toPandas())
+        if categorized_pd_df.empty:
+            print("[INFO] No new URLs to load. Skipping BigQuery load.")
+            spark.stop()
+            return
+        
+        categorized_df = spark.createDataFrame(categorized_pd_df)
         print("Data categorized successfully:")
         categorized_df.show(5)
 

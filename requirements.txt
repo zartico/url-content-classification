@@ -1,8 +1,13 @@
+aiohappyeyeballs==2.6.1
+aiohttp==3.12.14
+aiosignal==1.4.0
+attrs==25.3.0
 beautifulsoup4==4.13.4
 cachetools==5.5.2
 certifi==2025.7.9
 charset-normalizer==3.4.2
 db-dtypes==1.4.3
+frozenlist==1.7.0
 google-api-core==2.25.1
 google-auth==2.40.3
 google-cloud-bigquery==3.34.0
@@ -15,9 +20,11 @@ googleapis-common-protos==1.70.0
 grpcio==1.73.1
 grpcio-status==1.73.1
 idna==3.10
+multidict==6.6.3
 numpy==2.3.1
 packaging==25.0
 pandas==2.3.1
+propcache==0.3.2
 proto-plus==1.26.1
 protobuf==6.31.1
 py4j==0.10.9.7
@@ -29,8 +36,11 @@ python-dateutil==2.9.0.post0
 pytz==2025.2
 requests==2.32.4
 rsa==4.9.1
+setuptools==80.9.0
 six==1.17.0
 soupsieve==2.7
 typing_extensions==4.14.1
 tzdata==2025.2
 urllib3==2.5.0
+wheel==0.45.1
+yarl==1.20.1

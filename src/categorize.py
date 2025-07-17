@@ -1,11 +1,12 @@
-from pyspark.sql import DataFrame
-from pyspark.sql.functions import col, udf, lit
-from pyspark.sql.types import StringType, FloatType, BooleanType, StructType, StructField
-from config.project_config import PROJECT_ID
-from google.cloud import language_v1
-from bs4 import BeautifulSoup
-import requests
+from config.project_config import PROJECT_ID, BQ_DATASET_ID, BQ_TABLE_ID
+from utils.cache import hash_url, check_cache_for_urls, update_bq_cache
+from utils.web_fetch import fetch_all_pages
+from google.cloud import language_v1, bigquery
+from datetime import datetime, timezone
+import pandas as pd
+import asyncio
 import time
+
 
 def classify_text(text):
     """ Classify text using Google Cloud Natural Language API."""
@@ -29,73 +30,114 @@ def classify_text(text):
         print(f"[ERROR] NLP classification failed: {e}")
         return []
     
+# Main categorization function
+def categorize_urls(df):
+    client = bigquery.Client(project=PROJECT_ID)
+    assert "trimmed_page_url" in df.columns
+    assert "page_url" in df.columns
 
-def fetch_page_text(url):
-    """ Fetch and extract text from a webpage."""
+    trimmed_urls = df["trimmed_page_url"].tolist() # For hashing
+    url_hashes = [hash_url(url) for url in trimmed_urls]
+    # Check existing cache in bulk
+    cached_results = check_cache_for_urls(url_hashes, PROJECT_ID, BQ_DATASET_ID, BQ_TABLE_ID)
 
-    try:
-        response = requests.get(url, timeout=5)
-        print(f"[DEBUG] URL fetched: {url} - Status: {response.status_code}")
-        if response.status_code != 200:
-            return ""
-        soup = BeautifulSoup(response.text, "html.parser")
-        text = soup.get_text(separator=' ', strip=True)
-        print(f"[DEBUG] Word count: {len(text.split())}")
-        return text
-    except Exception as e:
-        print(f"[ERROR] Failed to fetch {url}: {e}")
-        return ""
+    page_urls = df["page_url"].tolist() # For fetching text, classification
+    page_text_map = asyncio.run(fetch_all_pages(page_urls))
 
-def categorize_single_url(url):
-    """
-    Categorize a single URL - returns tuple of (topic, confidence, review_flag)
-    This function will be used as a UDF
-    """
-    # Add rate limiting to avoid API overload
-    time.sleep(1) 
+    # Columns to be added to the DataFrame
+    content_topics, confidences, review_flags, raw_categories = [], [], [], []
+    created_ats, last_accesseds, view_counts= [], [], []
     
-    text = fetch_page_text(url)
-    if len(text.split()) < 20:
-        return (None, None, True)
-    
-    try:
-        categories = classify_text(text)
-        print(f"[DEBUG] Categories returned for {url}: {categories}")
-        if categories:
-            top_cat = categories[0]
-            return (top_cat.name, float(top_cat.confidence), top_cat.confidence < 0.6)
-        else:
-            return (None, None, True)
-    except Exception as e:
-        print(f"[ERROR] NLP failed for {url}: {e}")
-        return (None, None, True)
+    # Track cached indexes
+    cached_indexes = []
 
-# Define return type for UDF
-categorize_schema = StructType([
-    StructField("content_topic", StringType(), True),
-    StructField("prediction_confidence", FloatType(), True),
-    StructField("review_flag", BooleanType(), True)
-])
+    for idx, (trimmed_url, page_url) in enumerate(zip(df["trimmed_page_url"], df["page_url"])):
+        url_hash = hash_url(trimmed_url)
+        now_str = datetime.now(timezone.utc).isoformat()
 
-# Register UDF
-categorize_udf = udf(categorize_single_url, categorize_schema)
+        cached = cached_results.get(url_hash)
+        # If cached result exists, use it
+        if cached is not None:
+            # Update last accessed time and view count in cache
+            update_bq_cache(client, {
+                "url_hash": url_hash,
+                "content_topic": cached.content_topic,
+                "prediction_confidence": cached.prediction_confidence,
+                "review_flag": cached.review_flag,
+                "nlp_raw_categories": cached.nlp_raw_categories,
+                "trimmed_page_url": trimmed_url,
+                "site": getattr(cached, "site", None),
+                "page_url": page_url,
+                "client_id": getattr(cached, "client_id", None),
+                "view_count": getattr(cached, "view_count", 0)
+            }, PROJECT_ID, BQ_DATASET_ID, BQ_TABLE_ID)
 
-def categorize_urls(df: DataFrame) -> DataFrame:
-    """
-    Categorize URLs using Google NLP API.
-    
-    WARNING: This is the bottleneck for large datasets due to sequential API calls.
-    Consider batching or using a different approach for TB-scale data.
-    """
-    
-    # Apply categorization UDF
-    df_with_categories = df.withColumn("categorization", categorize_udf(col("page_url")))
-    
-    # Extract fields from struct
-    df_final = df_with_categories \
-        .withColumn("content_topic", col("categorization.content_topic")) \
-        .withColumn("prediction_confidence", col("categorization.prediction_confidence")) \
-        .withColumn("review_flag", col("categorization.review_flag")) \
-        .drop("categorization")
-    
-    return df_final
+            # Mark for removal from df
+            cached_indexes.append(idx)
+            continue
+
+        created_ats.append(now_str)
+        last_accesseds.append(now_str)
+        
+        # If not cached, fetch the page text
+        text = page_text_map.get(page_url, "")
+        if len(text.split()) < 20: # Too short to classify
+            content_topics.append(None)
+            confidences.append(None)
+            review_flags.append(True)
+            raw_categories.append(None)
+            view_counts.append(1)
+            continue
+
+        try: # Classify the text using NLP
+            categories = classify_text(text)
+            print(f"[DEBUG] Categories returned for {page_url}: {categories}")
+            if categories:
+                top_cat = categories[0]
+                content_topics.append(top_cat.name)
+                confidences.append(top_cat.confidence)
+                review_flags.append(top_cat.confidence < 0.6)
+                raw_categories.append(str([{"name": c.name, "confidence": c.confidence} for c in categories]))
+            else: # No categories found
+                content_topics.append(None)
+                confidences.append(None)
+                review_flags.append(True)
+                raw_categories.append(None)
+
+            view_counts.append(1)
+
+        except Exception as e:
+            print(f"[ERROR] NLP failed for {page_url}: {e}")
+            content_topics.append(None)
+            confidences.append(None)
+            review_flags.append(True)
+            raw_categories.append(None)
+            view_counts.append(1)
+
+        time.sleep(0.5)  # Rate limit
+
+    # Remove cached rows from df
+    df = df.drop(index=cached_indexes).reset_index(drop=True)
+
+    # If no new rows remain, return empty DataFrame with correct columns
+    if len(df) == 0:
+        # List all columns you expect downstream
+        return pd.DataFrame(columns=[
+            "url_hash", "created_at", "trimmed_page_url", "site", "page_url",
+            "content_topic", "prediction_confidence", "review_flag",
+            "nlp_raw_categories", "client_id", "last_accessed", "view_count"
+        ])
+
+    # Create a Pandas DataFrame with the new URL results
+    df["url_hash"] = url_hashes
+    df["created_at"] = created_ats
+    df["content_topic"] = content_topics
+    df["prediction_confidence"] = confidences
+    df["review_flag"] = review_flags
+    df["nlp_raw_categories"] = raw_categories
+    df["last_accessed"] = last_accesseds
+    df["view_count"] = view_counts
+    assert all(len(lst) == len(df) for lst in [url_hashes, content_topics, confidences, review_flags, raw_categories, view_counts]), "Length mismatch in output columns"
+    return df
+
+

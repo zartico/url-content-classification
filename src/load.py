@@ -1,8 +1,8 @@
 from pyspark.sql import DataFrame
+from pyspark.sql.types import *
 from google.cloud import bigquery
 from config.project_config import PROJECT_ID, BQ_DATASET_ID, BQ_TABLE_ID
 from google.api_core.exceptions import NotFound
-import time
 
 
 def ensure_dataset_and_table_exist():
@@ -27,13 +27,18 @@ def ensure_dataset_and_table_exist():
         client.get_table(table_ref)
     except NotFound:
         schema = [
+            bigquery.SchemaField("url_hash", "STRING", mode="REQUIRED"),
+            bigquery.SchemaField("created_at", "TIMESTAMP", mode="NULLABLE", default_value_expression="CURRENT_TIMESTAMP()"),
             bigquery.SchemaField("trimmed_page_url", "STRING", mode="NULLABLE"),
             bigquery.SchemaField("site", "STRING", mode="NULLABLE"),
             bigquery.SchemaField("page_url", "STRING", mode="NULLABLE"),
             bigquery.SchemaField("content_topic", "STRING", mode="NULLABLE"),
             bigquery.SchemaField("prediction_confidence", "FLOAT64", mode="NULLABLE"),
             bigquery.SchemaField("review_flag", "BOOLEAN", mode="NULLABLE"),
+            bigquery.SchemaField("nlp_raw_categories", "STRING", mode="NULLABLE"),
             bigquery.SchemaField("client_id", "STRING", mode="NULLABLE"),
+            bigquery.SchemaField("last_accessed", "TIMESTAMP", mode="NULLABLE"),
+            bigquery.SchemaField("view_count", "INTEGER", mode="NULLABLE"),
         ]
         table = bigquery.Table(table_ref, schema=schema)
         table = client.create_table(table)
@@ -41,30 +46,46 @@ def ensure_dataset_and_table_exist():
     
     return table_ref
 
-def load_data(df):
-    """ Load data into BigQuery using Spark BigQuery connector."""
-
+def load_data(df: DataFrame):
+    """ Load data into BigQuery using Spark BigQuery connector. """
     table_ref = ensure_dataset_and_table_exist()
     if table_ref is None:
         return
 
-    # Select only required columns
-    df_final = df.select(
-        "trimmed_page_url",
-        "site", 
-        "page_url",
-        "content_topic",
-        "prediction_confidence",
-        "review_flag",
-        "client_id"
+    # Enforce correct column order
+    ordered_columns = [
+        "url_hash", "created_at", "trimmed_page_url", "site", "page_url",
+        "content_topic", "prediction_confidence", "review_flag",
+        "nlp_raw_categories", "client_id", "last_accessed", "view_count"
+    ]
+    df_reordered = df.select(*ordered_columns)
+
+    # Explicit casting if necessary
+    df_casted = df_reordered.select(
+        df_reordered.url_hash.cast("string"),
+        df_reordered.created_at.cast("timestamp"),
+        df_reordered.trimmed_page_url.cast("string"),
+        df_reordered.site.cast("string"),
+        df_reordered.page_url.cast("string"),
+        df_reordered.content_topic.cast("string"),
+        df_reordered.prediction_confidence.cast("double"),
+        df_reordered.review_flag.cast("boolean"),
+        df_reordered.nlp_raw_categories.cast("string"),
+        df_reordered.client_id.cast("string"),
+        df_reordered.last_accessed.cast("timestamp"),
+        df_reordered.view_count.cast("integer")
     )
-    
+
+    print("[DEBUG] Spark schema before save:")
+    df_casted.printSchema()
+
     # Write to BigQuery
-    df_final.write \
+    df_casted.write \
         .format("bigquery") \
         .option("table", f"{PROJECT_ID}.{BQ_DATASET_ID}.{BQ_TABLE_ID}") \
         .option("writeMethod", "direct") \
         .mode("append") \
         .save()
-    
-    print(f"[INFO] Loaded {df_final.count()} rows to {BQ_TABLE_ID}")
+
+    print(f"[INFO] Loaded {df_casted.count()} rows to {BQ_TABLE_ID}")
+
