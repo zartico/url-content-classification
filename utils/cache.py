@@ -11,10 +11,13 @@ def check_cache_for_urls(url_hashes, project_id, dataset_id, table_id):
     Query BigQuery to retrieve cached classification results for a list of URL hashes.
     Returns a dict mapping url_hash → row data
     """
+    if not url_hashes:
+        return {}
+    
     client = bigquery.Client(project=project_id)
 
     query = f"""
-        SELECT url_hash, content_topic, prediction_confidence, review_flag, nlp_raw_categories,
+        SELECT url_hash, zartico_category, content_topic, prediction_confidence, review_flag, nlp_raw_categories,
                trimmed_page_url, site, page_url, client_id, last_accessed, view_count
         FROM `{project_id}.{dataset_id}.{table_id}`
         WHERE url_hash IN ({','.join([f"'{h}'" for h in url_hashes])})
@@ -44,3 +47,10 @@ def update_bq_cache(client, row, project_id, dataset_id, table_id):
         print(f"[DEBUG] Updated cache for {url_hash}")
     except Exception as e:
         print(f"[ERROR] MERGE failed for {url_hash}: {e}")
+
+def get_result_columns():
+    return [
+        "url_hash", "created_at", "trimmed_page_url", "site", "page_url",
+        "content_topic", "prediction_confidence", "review_flag",
+        "nlp_raw_categories", "client_id", "last_accessed", "view_count"
+    ]

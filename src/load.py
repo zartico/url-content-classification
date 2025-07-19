@@ -32,6 +32,7 @@ def ensure_dataset_and_table_exist():
             bigquery.SchemaField("trimmed_page_url", "STRING", mode="NULLABLE"),
             bigquery.SchemaField("site", "STRING", mode="NULLABLE"),
             bigquery.SchemaField("page_url", "STRING", mode="NULLABLE"),
+            bigquery.SchemaField("zartico_category", "STRING", mode="NULLABLE"),
             bigquery.SchemaField("content_topic", "STRING", mode="NULLABLE"),
             bigquery.SchemaField("prediction_confidence", "FLOAT64", mode="NULLABLE"),
             bigquery.SchemaField("review_flag", "BOOLEAN", mode="NULLABLE"),
@@ -55,7 +56,7 @@ def load_data(df: DataFrame):
     # Enforce correct column order
     ordered_columns = [
         "url_hash", "created_at", "trimmed_page_url", "site", "page_url",
-        "content_topic", "prediction_confidence", "review_flag",
+        "zartico_category", "content_topic", "prediction_confidence", "review_flag",
         "nlp_raw_categories", "client_id", "last_accessed", "view_count"
     ]
     df_reordered = df.select(*ordered_columns)
@@ -67,6 +68,7 @@ def load_data(df: DataFrame):
         df_reordered.trimmed_page_url.cast("string"),
         df_reordered.site.cast("string"),
         df_reordered.page_url.cast("string"),
+        df_reordered.zartico_category.cast("string"),
         df_reordered.content_topic.cast("string"),
         df_reordered.prediction_confidence.cast("double"),
         df_reordered.review_flag.cast("boolean"),
@@ -75,9 +77,6 @@ def load_data(df: DataFrame):
         df_reordered.last_accessed.cast("timestamp"),
         df_reordered.view_count.cast("integer")
     )
-
-    print("[DEBUG] Spark schema before save:")
-    df_casted.printSchema()
 
     # Write to BigQuery
     df_casted.write \

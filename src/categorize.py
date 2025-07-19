@@ -1,6 +1,8 @@
 from config.project_config import PROJECT_ID, BQ_DATASET_ID, BQ_TABLE_ID
-from utils.cache import hash_url, check_cache_for_urls, update_bq_cache
+from utils.cache import hash_url, check_cache_for_urls, update_bq_cache, get_result_columns
 from utils.web_fetch import fetch_all_pages
+from utils.category_mapping import map_to_zartico_category
+from utils.utils import is_homepage
 from google.cloud import language_v1, bigquery
 from datetime import datetime, timezone
 import pandas as pd
@@ -33,11 +35,19 @@ def classify_text(text):
 # Main categorization function
 def categorize_urls(df):
     client = bigquery.Client(project=PROJECT_ID)
-    assert "trimmed_page_url" in df.columns
-    assert "page_url" in df.columns
+
+    # Edge cases
+    if df.empty or "trimmed_page_url" not in df.columns:
+        return pd.DataFrame(columns=get_result_columns())
 
     trimmed_urls = df["trimmed_page_url"].tolist() # For hashing
+    if not trimmed_urls:
+        return pd.DataFrame(columns=get_result_columns())
+    
     url_hashes = [hash_url(url) for url in trimmed_urls]
+    if not url_hashes:
+        return pd.DataFrame(columns=get_result_columns())
+    
     # Check existing cache in bulk
     cached_results = check_cache_for_urls(url_hashes, PROJECT_ID, BQ_DATASET_ID, BQ_TABLE_ID)
 
@@ -45,7 +55,7 @@ def categorize_urls(df):
     page_text_map = asyncio.run(fetch_all_pages(page_urls))
 
     # Columns to be added to the DataFrame
-    content_topics, confidences, review_flags, raw_categories = [], [], [], []
+    zartico_categories, content_topics, confidences, review_flags, raw_categories = [], [], [], [], []
     created_ats, last_accesseds, view_counts= [], [], []
     
     # Track cached indexes
@@ -61,6 +71,7 @@ def categorize_urls(df):
             # Update last accessed time and view count in cache
             update_bq_cache(client, {
                 "url_hash": url_hash,
+                "zartico_category": cached.zartico_category,
                 "content_topic": cached.content_topic,
                 "prediction_confidence": cached.prediction_confidence,
                 "review_flag": cached.review_flag,
@@ -82,6 +93,7 @@ def categorize_urls(df):
         # If not cached, fetch the page text
         text = page_text_map.get(page_url, "")
         if len(text.split()) < 20: # Too short to classify
+            zartico_categories.append(None)
             content_topics.append(None)
             confidences.append(None)
             review_flags.append(True)
@@ -90,15 +102,26 @@ def categorize_urls(df):
             continue
 
         try: # Classify the text using NLP
+            # Check quota before proceeding 
+            # check_and_increment_quota() ** UNCOMMENT THIS LINE IN PRODUCTION **
             categories = classify_text(text)
             print(f"[DEBUG] Categories returned for {page_url}: {categories}")
             if categories:
                 top_cat = categories[0]
+
+                # Site is a homepage
+                if is_homepage(trimmed_url, df["site"][idx]):
+                    zartico_categories.append("Navigation & Home Page")
+                else:
+                    zartico_categories.append(map_to_zartico_category(top_cat.name))
+
+                zartico_categories.append(map_to_zartico_category(top_cat.name))
                 content_topics.append(top_cat.name)
                 confidences.append(top_cat.confidence)
                 review_flags.append(top_cat.confidence < 0.6)
                 raw_categories.append(str([{"name": c.name, "confidence": c.confidence} for c in categories]))
             else: # No categories found
+                zartico_categories.append(None)
                 content_topics.append(None)
                 confidences.append(None)
                 review_flags.append(True)
@@ -108,6 +131,7 @@ def categorize_urls(df):
 
         except Exception as e:
             print(f"[ERROR] NLP failed for {page_url}: {e}")
+            zartico_categories.append(None)
             content_topics.append(None)
             confidences.append(None)
             review_flags.append(True)
@@ -121,23 +145,19 @@ def categorize_urls(df):
 
     # If no new rows remain, return empty DataFrame with correct columns
     if len(df) == 0:
-        # List all columns you expect downstream
-        return pd.DataFrame(columns=[
-            "url_hash", "created_at", "trimmed_page_url", "site", "page_url",
-            "content_topic", "prediction_confidence", "review_flag",
-            "nlp_raw_categories", "client_id", "last_accessed", "view_count"
-        ])
+        return pd.DataFrame(columns=get_result_columns())
 
     # Create a Pandas DataFrame with the new URL results
     df["url_hash"] = url_hashes
     df["created_at"] = created_ats
+    df["zartico_category"] = zartico_categories
     df["content_topic"] = content_topics
     df["prediction_confidence"] = confidences
     df["review_flag"] = review_flags
     df["nlp_raw_categories"] = raw_categories
     df["last_accessed"] = last_accesseds
     df["view_count"] = view_counts
-    assert all(len(lst) == len(df) for lst in [url_hashes, content_topics, confidences, review_flags, raw_categories, view_counts]), "Length mismatch in output columns"
+
     return df
 
 
