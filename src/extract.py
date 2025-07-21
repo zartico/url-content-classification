@@ -26,7 +26,7 @@ def extract_data(spark: SparkSession, project_id: str, dataset_id: str, table_id
         WHERE trimmed_page_url IS NOT NULL
             AND site IS NOT NULL
             AND client_id NOT LIKE '%Demo%'
-            AND DATE BETWEEN '2025-07-01' AND '2025-07-02'
+            AND DATE BETWEEN '2025-07-04' AND '2025-07-05'
         LIMIT {limit}
         """
     

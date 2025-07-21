@@ -44,19 +44,19 @@ def categorize_urls(df):
     if not trimmed_urls:
         return pd.DataFrame(columns=get_result_columns())
     
-    url_hashes = [hash_url(url) for url in trimmed_urls]
-    if not url_hashes:
+    url_hashes_all = [hash_url(url) for url in trimmed_urls]
+    if not url_hashes_all:
         return pd.DataFrame(columns=get_result_columns())
     
     # Check existing cache in bulk
-    cached_results = check_cache_for_urls(url_hashes, PROJECT_ID, BQ_DATASET_ID, BQ_TABLE_ID)
+    cached_results = check_cache_for_urls(url_hashes_all, PROJECT_ID, BQ_DATASET_ID, BQ_TABLE_ID)
 
     page_urls = df["page_url"].tolist() # For fetching text, classification
     page_text_map = asyncio.run(fetch_all_pages(page_urls))
 
     # Columns to be added to the DataFrame
     zartico_categories, content_topics, confidences, review_flags, raw_categories = [], [], [], [], []
-    created_ats, last_accesseds, view_counts= [], [], []
+    url_hashes, created_ats, last_accesseds, view_counts= [], [], [], []
     
     # Track cached indexes
     cached_indexes = []
@@ -86,7 +86,8 @@ def categorize_urls(df):
             # Mark for removal from df
             cached_indexes.append(idx)
             continue
-
+        
+        url_hashes.append(url_hash)
         created_ats.append(now_str)
         last_accesseds.append(now_str)
         
@@ -115,7 +116,6 @@ def categorize_urls(df):
                 else:
                     zartico_categories.append(map_to_zartico_category(top_cat.name))
 
-                zartico_categories.append(map_to_zartico_category(top_cat.name))
                 content_topics.append(top_cat.name)
                 confidences.append(top_cat.confidence)
                 review_flags.append(top_cat.confidence < 0.6)
@@ -146,6 +146,19 @@ def categorize_urls(df):
     # If no new rows remain, return empty DataFrame with correct columns
     if len(df) == 0:
         return pd.DataFrame(columns=get_result_columns())
+
+    # Debug
+    print("[DEBUG] DataFrame length:", len(df))
+    print("[DEBUG] url_hashes:", len(url_hashes))
+    print("[DEBUG] created_ats:", len(created_ats))
+    print("[DEBUG] zartico_categories:", len(zartico_categories))
+    print("[DEBUG] content_topics:", len(content_topics))
+    print("[DEBUG] confidences:", len(confidences))
+    print("[DEBUG] review_flags:", len(review_flags))
+    print("[DEBUG] raw_categories:", len(raw_categories))
+    print("[DEBUG] last_accesseds:", len(last_accesseds))
+    print("[DEBUG] view_counts:", len(view_counts))
+
 
     # Create a Pandas DataFrame with the new URL results
     df["url_hash"] = url_hashes
