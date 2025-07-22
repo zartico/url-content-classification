@@ -1,64 +1,85 @@
 import ssl
 import aiohttp
 import asyncio
-from bs4 import BeautifulSoup
+import random
+import requests
+from playwright.async_api import async_playwright
 
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/114.0.0.0 Safari/537.36"
-    )
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+    "Referer": "https://www.google.com/",
+    "DNT": "1",  # Do Not Track
+    "Connection": "keep-alive",
 }
 
-# Fetch webpage content asynchronously with fallback for SSL
-async def fetch_single_page(session, url):
+async def fetch_aiohttp(session, url):
+    await asyncio.sleep(random.uniform(0.5, 2.0))
     try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as response:
-            print(f"[DEBUG] URL fetched: {url} - Status: {response.status}")
-
-            if response.status == 403 or response.status == 410:
-                # Retry with headers if forbidden or gone
-                async with session.get(url, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=8)) as retry_response:
-                    print(f"[DEBUG] Header retry for {url} - Status: {retry_response.status}")
-                    if retry_response.status != 200:
-                        return url, f"[ERROR {retry_response.status}]"
-                    html = await retry_response.text()
-                    soup = BeautifulSoup(html, "html.parser")
-                    text = soup.get_text(separator=' ', strip=True)
-                    return url, text
-            
-            elif response.status != 200:
-                return url, ""
-            html = await response.text()
-            soup = BeautifulSoup(html, "html.parser")
-            text = soup.get_text(separator=' ', strip=True)
-            print(f"[DEBUG] Word count: {len(text.split())}")
-            return url, text
-        
-    except aiohttp.ClientConnectorCertificateError:
-        try:
-            ssl_context = ssl.create_default_context()
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=8), ssl=ssl_context) as response:
-                print(f"[DEBUG] SSL fallback fetch: {url} - Status: {response.status}")
-                if response.status != 200:
-                    return url, ""
-                html = await response.text()
-                soup = BeautifulSoup(html, "html.parser")
-                text = soup.get_text(separator=' ', strip=True)
-                print(f"[DEBUG] Word count (fallback): {len(text.split())}")
-                return url, text
-        except Exception as e:
-            print(f"[ERROR] Retry failed for {url}: {e}")
-            return url, ""
+        async with session.get(url, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+            print(f"[AIOHTTP] {url} - {resp.status}")
+            if resp.status == 200:
+                html = await resp.text()
+                return url, html
+            return url, None  # trigger fallback
     except Exception as e:
-        print(f"[ERROR] Failed to fetch {url}: {e}")
-        return url, ""
+        print(f"[AIOHTTP-ERROR] {url}: {e}")
+        return url, None
+
+def fetch_requests(url):
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=10)
+        print(f"[REQUESTS] {url} - {r.status_code}")
+        if r.status_code == 200:
+            return url, r.text
+        return url, None
+    except Exception as e:
+        print(f"[REQUESTS-ERROR] {url}: {e}")
+        return url, None
+
+def fetch_playwright(url):
+    try:
+        with async_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context()
+            page = context.new_page()
+            page.goto(url, timeout=15000)
+            content = page.content()
+            print(f"[PLAYWRIGHT] {url} - OK")
+            browser.close()
+            return url, content
+    except Exception as e:
+        print(f"[PLAYWRIGHT-ERROR] {url}: {e}")
+        return url, None
 
 async def fetch_all_pages(urls):
+    results = {}
+
     async with aiohttp.ClientSession() as session:
-        tasks = [fetch_single_page(session, url) for url in urls]
-        results = await asyncio.gather(*tasks)
-        return dict(results)
+        aio_tasks = [fetch_aiohttp(session, url) for url in urls]
+        aio_results = await asyncio.gather(*aio_tasks)
+
+    for url, html in aio_results:
+        if html:
+            results[url] = html
+            continue
+
+        # Try requests
+        url, html = fetch_requests(url)
+        if html:
+            results[url] = html
+            continue
+
+        # Try Playwright
+        url, html = fetch_playwright(url)
+        if html:
+            results[url] = html
+        else:
+            results[url] = "[ERROR] All methods failed"
+
+    return results

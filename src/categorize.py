@@ -4,16 +4,22 @@ from utils.web_fetch import fetch_all_pages
 from utils.category_mapping import map_to_zartico_category
 from utils.utils import is_homepage
 from google.cloud import language_v1, bigquery
+from bs4 import BeautifulSoup
 from datetime import datetime, timezone
 import pandas as pd
 import asyncio
 import time
 
 
-def classify_text(text):
+def classify_text(raw_html):
     """ Classify text using Google Cloud Natural Language API."""
 
     try:
+        # Extract and sanitize visible text
+        soup = BeautifulSoup(raw_html, "html.parser")
+        text = soup.get_text(separator=' ', strip=True)
+
+        # Call Google NLP V2 API
         client = language_v1.LanguageServiceClient(
             client_options={"quota_project_id": PROJECT_ID}
         )
