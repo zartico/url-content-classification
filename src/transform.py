@@ -1,60 +1,32 @@
 from pyspark.sql import DataFrame
-from pyspark.sql.functions import col, when, regexp_replace, lower, trim, udf
-from pyspark.sql.types import StringType
-from urllib.parse import urljoin
-import re
-
-def build_full_url(trimmed, site):
-    if not trimmed or not site:
-        return None
-
-    trimmed = trimmed.strip().lower()
-    site = site.strip().lower()
-
-    # Filter invalid/ placeholder values
-    invalid_values = {"(not set)", "none", "null", ""}
-    if trimmed in invalid_values or site in invalid_values:
-        return None
-
-    # Already full URL, return cleaned
-    if trimmed.startswith("http://") or trimmed.startswith("https://"):
-        return trimmed.rstrip("/")
-
-    # Handle double slashes
-    if trimmed.startswith("//"):
-        return f"https:{trimmed.rstrip('/')}"
-
-    # Trimmed is path (starts with /), fallback to site column
-    if trimmed.startswith("/"):
-        return f"https://{site.rstrip('/')}{trimmed}"
-
-    # Default: assume trimmed includes domain, prepend https://
-    return f"https://{trimmed.rstrip('/')}"
-
-# Register UDF
-build_full_url_udf = udf(build_full_url, StringType())
+from pyspark.sql.functions import (
+    col, when, lower, trim, lit, concat, concat_ws
+)
 
 def transform_data(df: DataFrame) -> DataFrame:
     """
-    Transform data by building full URLs and deduplicating.
-    
-    Args:
-        df: Input Spark DataFrame
-        
-    Returns:
-        DataFrame: Transformed Spark DataFrame
+    Build full URLs using Spark logic instead of Python UDF.
+    Clean and deduplicate the dataset.
     """
-    
-    # Build full URLs
-    df_with_urls = df.withColumn(
-        "page_url", 
-        build_full_url_udf(col("trimmed_page_url"), col("site"))
+    invalids = ["(not set)", "none", "null", ""]
+
+    df_cleaned = df.withColumn("trimmed_page_url", trim(lower(col("trimmed_page_url")))) \
+        .withColumn("site", trim(lower(col("site"))))
+
+    df_filtered = df_cleaned.filter(
+        ~col("trimmed_page_url").isin(invalids) & ~col("site").isin(invalids)
     )
-    
-    # Filter out null URLs and deduplicate
-    df_clean = df_with_urls \
-        .filter(col("page_url").isNotNull()) \
+
+    df_transformed = df_filtered.withColumn(
+        "page_url",
+        when(col("trimmed_page_url").startswith("http"), col("trimmed_page_url").substr(1, 999))
+        .when(col("trimmed_page_url").startswith("//"), concat(lit("https:"), col("trimmed_page_url")))
+        .when(col("trimmed_page_url").startswith("/"),
+              concat(lit("https://"), col("site"), col("trimmed_page_url")))
+        .otherwise(concat(lit("https://"), col("trimmed_page_url")))
+    )
+
+    df_result = df_transformed.filter(col("page_url").isNotNull()) \
         .dropDuplicates(["page_url", "client_id"])
-    
-    print(f"[INFO] Transformed and deduplicated to {df_clean.count()} rows")
-    return df_clean
+
+    return df_result

@@ -2,6 +2,8 @@ from airflow.decorators import dag, task
 from airflow.utils.dates import days_ago
 from airflow.models import Variable
 
+from datetime import timedelta
+import pandas as pd
 import sys
 import os
 
@@ -36,7 +38,7 @@ def create_spark_session():
     tags=["url-content"],
 )
 def url_content_batch():
-    @task(task_id="extract_data")
+    @task(task_id="extract_data", retries=0, retry_delay=timedelta(minutes=0))
     def extract():
         spark = create_spark_session()
         from config.project_config import PROJECT_ID, GA4_DATASET_ID, GA4_TABLE_ID
@@ -46,7 +48,7 @@ def url_content_batch():
         spark.stop()
         return temp_path
 
-    @task(task_id="transform_data")
+    @task(task_id="transform_data", retries=0, retry_delay=timedelta(minutes=0))
     def transform(raw_path):
         spark = create_spark_session()
         raw_df = spark.read.parquet(raw_path)
@@ -56,7 +58,7 @@ def url_content_batch():
         spark.stop()
         return temp_path
 
-    @task(task_id="categorize_urls")
+    @task(task_id="categorize_urls", retries=0, retry_delay=timedelta(minutes=0))
     def categorize(transformed_path):
         spark = create_spark_session()
         transformed_df = spark.read.parquet(transformed_path)
@@ -66,9 +68,8 @@ def url_content_batch():
         spark.stop()
         return temp_path
 
-    @task(task_id="load_data")
-    def load(categorized_pd_df):
-        import pandas as pd
+    @task(task_id="load_data", retries=0, retry_delay=timedelta(minutes=0))
+    def load(categorized_path):
         categorized_pd_df = pd.read_csv(categorized_path)
         spark = create_spark_session()
         categorized_df = spark.createDataFrame(categorized_pd_df)
