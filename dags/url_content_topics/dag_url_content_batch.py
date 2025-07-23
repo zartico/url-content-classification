@@ -68,3 +68,4 @@ def url_content_batch():
     load(categorized_pd_df)
 
 url_content_batch()
+
