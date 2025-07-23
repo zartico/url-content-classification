@@ -8,10 +8,10 @@ sys.path.append('/home/airflow/gcs/data/url-content-topics/src')
 sys.path.append('/home/airflow/gcs/data/url-content-topics/utils')
 sys.path.append('/home/airflow/gcs/data/url-content-topics/config')
 
-from src.extract import extract_data
-from src.transform import transform_data
-from src.categorize import categorize_urls
-from src.load import load_data
+from extract import extract_data
+from transform import transform_data
+from categorize import categorize_urls
+from load import load_data
 
 def create_spark_session():
     """Create Spark session with BigQuery connector"""
