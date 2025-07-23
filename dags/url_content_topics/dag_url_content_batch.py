@@ -4,9 +4,9 @@ from airflow.models import Variable
 import pandas as pd
 import sys
 
-sys.path.append('/home/airflow/gcs/data/url-content-topics/src')
-sys.path.append('/home/airflow/gcs/data/url-content-topics/utils')
-sys.path.append('/home/airflow/gcs/data/url-content-topics/config')
+sys.path.append('/home/airflow/gcs/data/url_content_topics/src')
+sys.path.append('/home/airflow/gcs/data/url_content_topics/utils')
+sys.path.append('/home/airflow/gcs/data/url_content_topics/config')
 
 from extract import extract_data
 from transform import transform_data
