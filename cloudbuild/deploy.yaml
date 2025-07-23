@@ -4,10 +4,10 @@ steps:
       - '-c'
       - >-
         echo "$BRANCH_NAME DEPLOYING";
-        gsutil -m cp -r ./dags/url_content_topics/ gs://sandbox-de/dags/;
-        gsutil -m cp -r src/* gs://sandbox-de/data/url_content_topics/src
-        gsutil -m cp -r utils/* gs://sandbox-de/data/url_content_topics/utils
-        gsutil -m cp -r config/* gs://sandbox-de/data/url_content_topics/config
+        gsutil -m cp -r ./dags/url_content_topics/ gs://us-central1-sandbox-de-72ce2372-bucket/dags/;
+        gsutil -m cp -r ./src/ gs://us-central1-sandbox-de-72ce2372-bucket/data/url_content_topics/src/;
+        gsutil -m cp -r ./utils/ gs://us-central1-sandbox-de-72ce2372-bucket/data/url_content_topics/utils/;
+        gsutil -m cp -r ./config/ gs://us-central1-sandbox-de-72ce2372-bucket/data/url_content_topics/config/;
     id: Deploy
     entrypoint: bash
 options:
