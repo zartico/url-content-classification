@@ -3,7 +3,7 @@ from airflow.utils.dates import days_ago
 from airflow.models import Variable
 import pandas as pd
 import sys
-
+sys.path.append('/home/airflow/gcs/data/url_content_topics')
 sys.path.append('/home/airflow/gcs/data/url_content_topics/src')
 sys.path.append('/home/airflow/gcs/data/url_content_topics/utils')
 sys.path.append('/home/airflow/gcs/data/url_content_topics/config')
@@ -37,7 +37,7 @@ def url_content_batch():
     @task(task_id="extract_data")
     def extract():
         spark = create_spark_session()
-        from project_config import PROJECT_ID, GA4_DATASET_ID, GA4_TABLE_ID
+        from config.project_config import PROJECT_ID, GA4_DATASET_ID, GA4_TABLE_ID
         raw_df = extract_data(spark, PROJECT_ID, GA4_DATASET_ID, GA4_TABLE_ID)
         spark.stop()
         return raw_df
