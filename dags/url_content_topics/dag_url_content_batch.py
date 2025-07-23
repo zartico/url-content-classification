@@ -37,7 +37,7 @@ def url_content_batch():
     @task(task_id="extract_data")
     def extract():
         spark = create_spark_session()
-        from config.project_config import PROJECT_ID, GA4_DATASET_ID, GA4_TABLE_ID
+        from project_config import PROJECT_ID, GA4_DATASET_ID, GA4_TABLE_ID
         raw_df = extract_data(spark, PROJECT_ID, GA4_DATASET_ID, GA4_TABLE_ID)
         spark.stop()
         return raw_df
