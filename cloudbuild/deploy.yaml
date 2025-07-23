@@ -1,0 +1,14 @@
+steps:
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:alpine'
+    args:
+      - '-c'
+      - >-
+        echo "$BRANCH_NAME DEPLOYING";
+        gsutil -m cp -r ./dags/url_content_topics/ gs://sandbox-de/dags/;
+        gsutil -m cp -r src/* gs://sandbox-de/data/url_content_topics/src
+        gsutil -m cp -r utils/* gs://sandbox-de/data/url_content_topics/utils
+        gsutil -m cp -r config/* gs://sandbox-de/data/url_content_topics/config
+    id: Deploy
+    entrypoint: bash
+options:
+  logging: CLOUD_LOGGING_ONLY
