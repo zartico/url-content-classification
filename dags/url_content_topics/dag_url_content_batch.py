@@ -1,8 +1,10 @@
 from airflow.decorators import dag, task
 from airflow.utils.dates import days_ago
 from airflow.models import Variable
-import pandas as pd
+
 import sys
+import os
+
 sys.path.append('/home/airflow/gcs/data/url_content_topics')
 sys.path.append('/home/airflow/gcs/data/url_content_topics/src')
 sys.path.append('/home/airflow/gcs/data/url_content_topics/utils')
@@ -39,33 +41,45 @@ def url_content_batch():
         spark = create_spark_session()
         from config.project_config import PROJECT_ID, GA4_DATASET_ID, GA4_TABLE_ID
         raw_df = extract_data(spark, PROJECT_ID, GA4_DATASET_ID, GA4_TABLE_ID)
+        temp_path = "/home/airflow/gcs/data/url_content_topics/tmp/raw.parquet"
+        raw_df.write.mode("overwrite").parquet(temp_path)
         spark.stop()
-        return raw_df
+        return temp_path
 
     @task(task_id="transform_data")
-    def transform(raw_df):
+    def transform(raw_path):
         spark = create_spark_session()
+        raw_df = spark.read.parquet(raw_path)
         transformed_df = transform_data(raw_df)
+        temp_path = "/home/airflow/gcs/data/url_content_topics/tmp/transformed.parquet"
+        transformed_df.write.mode("overwrite").parquet(temp_path)
         spark.stop()
-        return transformed_df
+        return temp_path
 
     @task(task_id="categorize_urls")
-    def categorize(transformed_df):
+    def categorize(transformed_path):
+        spark = create_spark_session()
+        transformed_df = spark.read.parquet(transformed_path)
         categorized_pd_df = categorize_urls(transformed_df.toPandas())
-        return categorized_pd_df
+        temp_path = "/home/airflow/gcs/data/url_content_topics/tmp/categorized.csv"
+        categorized_pd_df.to_csv(temp_path, index=False)
+        spark.stop()
+        return temp_path
 
     @task(task_id="load_data")
     def load(categorized_pd_df):
+        import pandas as pd
+        categorized_pd_df = pd.read_csv(categorized_path)
         spark = create_spark_session()
         categorized_df = spark.createDataFrame(categorized_pd_df)
         load_data(categorized_df)
         spark.stop()
         return "Loaded"
 
-    raw_df = extract()
-    transformed_df = transform(raw_df)
-    categorized_pd_df = categorize(transformed_df)
-    load(categorized_pd_df)
+    raw_path = extract()
+    transformed_path = transform(raw_path)
+    categorized_path = categorize(transformed_path)
+    load(categorized_path)
 
 url_content_batch()
 
