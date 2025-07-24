@@ -93,20 +93,18 @@ def categorize_urls(df):
             cached_indexes.append(idx)
             continue
         
+        # If not cached, fetch the page text
+        text = page_text_map.get(page_url, "")
+
+        # If no text or not long enough for NLP API, skip this URL
+        if not text or len(text.split()) < 20:
+            print(f"[SKIP] Skipping {page_url} due to missing or insufficient content.")
+            continue  # Skip this row entirely
+
         url_hashes.append(url_hash)
         created_ats.append(now_str)
         last_accesseds.append(now_str)
         
-        # If not cached, fetch the page text
-        text = page_text_map.get(page_url, "")
-        if len(text.split()) < 20: # Too short to classify
-            zartico_categories.append(None)
-            content_topics.append(None)
-            confidences.append(None)
-            review_flags.append(True)
-            raw_categories.append(None)
-            view_counts.append(1)
-            continue
 
         try: # Classify the text using NLP
             # Check quota before proceeding 

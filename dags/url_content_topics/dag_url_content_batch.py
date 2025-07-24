@@ -71,6 +71,9 @@ def url_content_batch():
     @task(task_id="load_data", retries=0, retry_delay=timedelta(minutes=0))
     def load(categorized_path):
         categorized_pd_df = pd.read_csv(categorized_path)
+        if categorized_pd_df.empty:
+            print("[WARNING] No data to load. DataFrame is empty.")
+            return "No data loaded"
         spark = create_spark_session()
         categorized_df = spark.createDataFrame(categorized_pd_df)
         load_data(categorized_df)
