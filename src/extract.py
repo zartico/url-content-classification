@@ -4,7 +4,7 @@ from pyspark.sql.functions import col, lit
 from google.cloud import bigquery
 
 
-def extract_data(spark: SparkSession, project_id: str, dataset_id: str, table_id: str, limit: int = 25):
+def extract_data(spark: SparkSession, project_id: str, dataset_id: str, table_id: str, limit: int = 500):
 
     """
     Extracts data from a BigQuery table using Spark BigQuery connector
@@ -26,7 +26,6 @@ def extract_data(spark: SparkSession, project_id: str, dataset_id: str, table_id
         WHERE trimmed_page_url IS NOT NULL
             AND site IS NOT NULL
             AND client_id NOT LIKE '%Demo%'
-            AND DATE BETWEEN '2025-07-08' AND '2025-07-09'
         LIMIT {limit}
         """
     

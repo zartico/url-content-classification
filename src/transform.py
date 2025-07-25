@@ -28,5 +28,7 @@ def transform_data(df: DataFrame) -> DataFrame:
 
     df_result = df_transformed.filter(col("page_url").isNotNull()) \
         .dropDuplicates(["page_url", "client_id"])
+    
+    print(f"[INFO] Cleaned/built URLs for {df_result.count()} rows from BigQuery")
 
     return df_result

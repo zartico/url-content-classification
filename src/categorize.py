@@ -65,7 +65,7 @@ def categorize_urls(df):
     url_hashes, created_ats, last_accesseds, view_counts= [], [], [], []
     
     # Track cached indexes
-    cached_indexes = []
+    cached_indexes, processed_indexes = [], []
 
     for idx, (trimmed_url, page_url) in enumerate(zip(df["trimmed_page_url"], df["page_url"])):
         url_hash = hash_url(trimmed_url)
@@ -101,11 +101,12 @@ def categorize_urls(df):
             print(f"[SKIP] Skipping {page_url} due to missing or insufficient content.")
             continue  # Skip this row entirely
 
+        processed_indexes.append(idx)
+        
         url_hashes.append(url_hash)
         created_ats.append(now_str)
         last_accesseds.append(now_str)
         
-
         try: # Classify the text using NLP
             # Check quota before proceeding 
             # check_and_increment_quota() ** UNCOMMENT THIS LINE IN PRODUCTION **
@@ -165,16 +166,21 @@ def categorize_urls(df):
 
 
     # Create a Pandas DataFrame with the new URL results
-    df["url_hash"] = url_hashes
-    df["created_at"] = created_ats
-    df["zartico_category"] = zartico_categories
-    df["content_topic"] = content_topics
-    df["prediction_confidence"] = confidences
-    df["review_flag"] = review_flags
-    df["nlp_raw_categories"] = raw_categories
-    df["last_accessed"] = last_accesseds
-    df["view_count"] = view_counts
+    result_df = pd.DataFrame({
+    "url_hash": url_hashes,
+    "created_at": created_ats,
+    "trimmed_page_url": [df["trimmed_page_url"].iloc[i] for i in processed_indexes],
+    "site": [df["site"].iloc[i] for i in processed_indexes],
+    "page_url": [df["page_url"].iloc[i] for i in processed_indexes],
+    "content_topic": content_topics,
+    "prediction_confidence": confidences,
+    "review_flag": review_flags,
+    "nlp_raw_categories": raw_categories,
+    "client_id": [df["client_id"].iloc[i] for i in processed_indexes] if "client_id" in df.columns else [None]*len(processed_indexes),
+    "last_accessed": last_accesseds,
+    "view_count": view_counts,
+    "zartico_category": zartico_categories,
+})
 
-    return df
-
+    return result_df
 
