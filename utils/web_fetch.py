@@ -3,7 +3,7 @@ import aiohttp
 import asyncio
 import random
 import requests
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
 HEADERS = {
     "User-Agent": (
@@ -18,49 +18,55 @@ HEADERS = {
     "Connection": "keep-alive",
 }
 
-async def fetch_aiohttp(session, url):
-    await asyncio.sleep(random.uniform(0.5, 2.0))
+async def fetch_aiohttp(session, url: str) -> tuple[str, str | None]:
+    await asyncio.sleep(random.uniform(0.5, 1.5))  # jitter
     try:
-        async with session.get(url, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+        async with session.get(url, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=10)) as resp:
             print(f"[AIOHTTP] {url} - {resp.status}")
-            if resp.status == 200:
-                html = await resp.text()
-                return url, html
-            return url, None  # trigger fallback
+            if resp.status in (200, 410):
+                return url, await resp.text()
+            return url, None
     except Exception as e:
         print(f"[AIOHTTP-ERROR] {url}: {e}")
         return url, None
 
-def fetch_requests(url):
+
+def fetch_requests(url: str) -> tuple[str, str | None]:
     try:
         r = requests.get(url, headers=HEADERS, timeout=10)
         print(f"[REQUESTS] {url} - {r.status_code}")
-        if r.status_code == 200:
+        if r.status_code in (200, 410):
             return url, r.text
         return url, None
     except Exception as e:
         print(f"[REQUESTS-ERROR] {url}: {e}")
         return url, None
 
-def fetch_playwright(url):
+
+async def fetch_playwright(url: str) -> tuple[str, str | None]:
     try:
-        with async_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            context = browser.new_context()
-            page = context.new_page()
-            page.goto(url, timeout=15000)
-            content = page.content()
-            print(f"[PLAYWRIGHT] {url} - OK")
-            browser.close()
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context()
+            page = await context.new_page()
+            response = await page.goto(url, timeout=15000)
+            content = await page.content()
+            status = response.status if response else "?"
+            print(f"[PLAYWRIGHT] {url} - {status}")
+            await browser.close()
             return url, content
+    except PlaywrightTimeoutError:
+        print(f"[PLAYWRIGHT-TIMEOUT] {url}")
     except Exception as e:
         print(f"[PLAYWRIGHT-ERROR] {url}: {e}")
-        return url, None
+    return url, None
 
-async def fetch_all_pages(urls):
+
+async def fetch_all_pages(urls: list[str]) -> dict[str, str]:
     results = {}
+    connector = aiohttp.TCPConnector(limit=10)
 
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(connector=connector) as session:
         aio_tasks = [fetch_aiohttp(session, url) for url in urls]
         aio_results = await asyncio.gather(*aio_tasks)
 
@@ -76,10 +82,7 @@ async def fetch_all_pages(urls):
             continue
 
         # Try Playwright
-        url, html = fetch_playwright(url)
-        if html:
-            results[url] = html
-        else:
-            results[url] = "[ERROR] All methods failed"
+        url, html = await fetch_playwright(url)
+        results[url] = html if html else "[ERROR] All methods failed"
 
     return results
