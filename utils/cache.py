@@ -1,3 +1,4 @@
+from config.project_config import PROJECT_ID, BQ_DATASET_ID, BQ_TABLE_ID
 from google.cloud import bigquery
 from hashlib import sha256
 from datetime import datetime, timezone
@@ -54,3 +55,38 @@ def get_result_columns():
         "content_topic", "prediction_confidence", "review_flag",
         "nlp_raw_categories", "client_id", "last_accessed", "view_count"
     ]
+
+def filter_cache(df):
+    client = bigquery.Client(project=PROJECT_ID)
+
+    # Edge cases
+    if df.empty or "trimmed_page_url" not in df.columns:
+        return pd.DataFrame(columns=get_result_columns())
+
+    trimmed_urls = df["trimmed_page_url"].tolist() # For hashing
+    if not trimmed_urls:
+        return pd.DataFrame(columns=get_result_columns())
+    
+    url_hashes_all = [hash_url(url) for url in trimmed_urls]
+    if not url_hashes_all:
+        return pd.DataFrame(columns=get_result_columns())
+    
+    # Check existing cache in bulk
+    cached_results = check_cache_for_urls(url_hashes_all, PROJECT_ID, BQ_DATASET_ID, BQ_TABLE_ID)
+
+    df["is_cached"] = df["trimmed_page_url"].apply(lambda u: hash_url(u) in cached_results)
+    for idx, row in df[df["is_cached"]].iterrows():
+        url_hash = hash_url(row["trimmed_page_url"])
+        update_bq_cache(client, {
+            "url_hash": url_hash,
+            # Only view_count and last_accessed are updated in your merge query
+        }, PROJECT_ID, BQ_DATASET_ID, BQ_TABLE_ID)
+
+    # Filter out cached rows
+    uncached_df = df[~df["is_cached"]].copy()
+    if uncached_df.empty:
+        print("[INFO] All URLs are cached. No uncached URLs to process.")
+        return pd.DataFrame(columns=get_result_columns())
+
+    return uncached_df
+

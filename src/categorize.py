@@ -38,71 +38,40 @@ def classify_text(raw_html):
         print(f"[ERROR] NLP classification failed: {e}")
         return []
     
+
 # Main categorization function
 def categorize_urls(df):
     client = bigquery.Client(project=PROJECT_ID)
 
-    # Edge cases
-    if df.empty or "trimmed_page_url" not in df.columns:
-        return pd.DataFrame(columns=get_result_columns())
-
-    trimmed_urls = df["trimmed_page_url"].tolist() # For hashing
-    if not trimmed_urls:
+    # Edge case
+    if df.empty:
+        print("[DEBUG] Empty DataFrame received, returning empty result.")
         return pd.DataFrame(columns=get_result_columns())
     
-    url_hashes_all = [hash_url(url) for url in trimmed_urls]
-    if not url_hashes_all:
+    if "page_text" not in df.columns:
+        print("[DEBUG] Missing page_text, returning empty result.")
         return pd.DataFrame(columns=get_result_columns())
     
-    # Check existing cache in bulk
-    cached_results = check_cache_for_urls(url_hashes_all, PROJECT_ID, BQ_DATASET_ID, BQ_TABLE_ID)
-
-    page_urls = df["page_url"].tolist() # For fetching text, classification
-    page_text_map = asyncio.run(fetch_all_pages(page_urls))
-
     # Columns to be added to the DataFrame
     zartico_categories, content_topics, confidences, review_flags, raw_categories = [], [], [], [], []
     url_hashes, created_ats, last_accesseds, view_counts= [], [], [], []
-    
-    # Track cached indexes
-    cached_indexes, processed_indexes = [], []
+    processed_indexes = [], []
 
-    for idx, (trimmed_url, page_url) in enumerate(zip(df["trimmed_page_url"], df["page_url"])):
+    for idx, row in df.iterrows():
+        page_url = row["page_url"]
+        trimmed_url = row["trimmed_page_url"]
+        site = row["site"]
+        page_text = row.get("page_text", "")
+
         url_hash = hash_url(trimmed_url)
         now_str = datetime.now(timezone.utc).isoformat()
 
-        cached = cached_results.get(url_hash)
-        # If cached result exists, use it
-        if cached is not None:
-            # Update last accessed time and view count in cache
-            update_bq_cache(client, {
-                "url_hash": url_hash,
-                "zartico_category": cached.zartico_category,
-                "content_topic": cached.content_topic,
-                "prediction_confidence": cached.prediction_confidence,
-                "review_flag": cached.review_flag,
-                "nlp_raw_categories": cached.nlp_raw_categories,
-                "trimmed_page_url": trimmed_url,
-                "site": getattr(cached, "site", None),
-                "page_url": page_url,
-                "client_id": getattr(cached, "client_id", None),
-                "view_count": getattr(cached, "view_count", 0)
-            }, PROJECT_ID, BQ_DATASET_ID, BQ_TABLE_ID)
-
-            # Mark for removal from df
-            cached_indexes.append(idx)
-            continue
-        
-        # If not cached, fetch the page text
-        text = page_text_map.get(page_url, "")
-
         # If no text or not long enough for NLP API, skip this URL
-        if not text or len(text.split()) < 20:
+        if not page_text or len(page_text.split()) < 20:
             print(f"[SKIP] Skipping {page_url} due to missing or insufficient content.")
             continue  # Skip this row entirely
 
         processed_indexes.append(idx)
-        
         url_hashes.append(url_hash)
         created_ats.append(now_str)
         last_accesseds.append(now_str)
@@ -110,7 +79,7 @@ def categorize_urls(df):
         try: # Classify the text using NLP
             # Check quota before proceeding 
             # check_and_increment_quota() ** UNCOMMENT THIS LINE IN PRODUCTION **
-            categories = classify_text(text)
+            categories = classify_text(page_text)
             print(f"[DEBUG] Categories returned for {page_url}: {categories}")
             if categories:
                 top_cat = categories[0]
@@ -125,6 +94,7 @@ def categorize_urls(df):
                 confidences.append(top_cat.confidence)
                 review_flags.append(top_cat.confidence < 0.6)
                 raw_categories.append(str([{"name": c.name, "confidence": c.confidence} for c in categories]))
+
             else: # No categories found
                 zartico_categories.append(None)
                 content_topics.append(None)
@@ -145,11 +115,8 @@ def categorize_urls(df):
 
         time.sleep(0.5)  # Rate limit
 
-    # Remove cached rows from df
-    df = df.drop(index=cached_indexes).reset_index(drop=True)
-
     # If no new rows remain, return empty DataFrame with correct columns
-    if len(df) == 0:
+    if not processed_indexes or len(df) == 0:
         return pd.DataFrame(columns=get_result_columns())
 
     # Debug
@@ -167,20 +134,20 @@ def categorize_urls(df):
 
     # Create a Pandas DataFrame with the new URL results
     result_df = pd.DataFrame({
-    "url_hash": url_hashes,
-    "created_at": created_ats,
-    "trimmed_page_url": [df["trimmed_page_url"].iloc[i] for i in processed_indexes],
-    "site": [df["site"].iloc[i] for i in processed_indexes],
-    "page_url": [df["page_url"].iloc[i] for i in processed_indexes],
-    "content_topic": content_topics,
-    "prediction_confidence": confidences,
-    "review_flag": review_flags,
-    "nlp_raw_categories": raw_categories,
-    "client_id": [df["client_id"].iloc[i] for i in processed_indexes] if "client_id" in df.columns else [None]*len(processed_indexes),
-    "last_accessed": last_accesseds,
-    "view_count": view_counts,
-    "zartico_category": zartico_categories,
-})
+        "url_hash": url_hashes,
+        "created_at": created_ats,
+        "trimmed_page_url": [df["trimmed_page_url"].iloc[i] for i in processed_indexes],
+        "site": [df["site"].iloc[i] for i in processed_indexes],
+        "page_url": [df["page_url"].iloc[i] for i in processed_indexes],
+        "content_topic": content_topics,
+        "prediction_confidence": confidences,
+        "review_flag": review_flags,
+        "nlp_raw_categories": raw_categories,
+        "client_id": [df["client_id"].iloc[i] for i in processed_indexes] if "client_id" in df.columns else [None]*len(processed_indexes),
+        "last_accessed": last_accesseds,
+        "view_count": view_counts,
+        "zartico_category": zartico_categories,
+    })
 
     return result_df
 
