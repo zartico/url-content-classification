@@ -98,25 +98,27 @@ def url_content_batch():
         return batch_chunk
 
     @task(task_id="categorize_urls", retries=0, retry_delay=timedelta(minutes=0))
-    def categorize(batch_chunk):
+    def categorize(batch_with_texts):
         print("[CATEGORIZE] Starting URL categorization")
-        df_page_text = pd.DataFrame(batch_chunk)
+        df_page_text = pd.DataFrame(batch_with_texts)
         categorized_df = categorize_urls(df_page_text)
-        #return categorized_df.to_dict(orient="records")
-        temp_path = "/home/airflow/gcs/data/url_content_topics/tmp/categorized.csv"
-        categorized_df.to_csv(temp_path, index=False)
-        print(f"[CATEGORIZE] Categorized data written to: {temp_path}")
-        return temp_path
+        print(f"[CATEGORIZE] Categorized {len(categorized_df)} URLs")
+        return categorized_df.to_dict(orient="records")
+        # temp_path = "/home/airflow/gcs/data/url_content_topics/tmp/categorized.csv"
+        # categorized_df.to_csv(temp_path, index=False)
+        # print(f"[CATEGORIZE] Categorized data written to: {temp_path}")
+        # return temp_path
 
     @task(task_id="load_data", retries=0, retry_delay=timedelta(minutes=0))
-    def load(categorized_path):
+    def load(batch_rows):
         print("[LOAD] Loading categorized data into BigQuery")
-        categorized_pd_df = pd.read_csv(categorized_path)
-        if categorized_pd_df.empty:
-            print("[WARNING] No data to load. DataFrame is empty.")
-            return "No data loaded"
+        # categorized_pd_df = pd.read_csv(categorized_path)
+        # if categorized_pd_df.empty:
+        #     print("[WARNING] No data to load. DataFrame is empty.")
+        #     return "No data loaded"
         spark = create_spark_session()
-        new_data = spark.createDataFrame(categorized_pd_df)
+        categorized_df = spark.createDataFrame(batch_rows)
+        new_data = spark.createDataFrame(categorized_df)
         load_data(new_data)
         spark.stop()
         print("[LOAD] Data loaded successfully")
@@ -126,9 +128,9 @@ def url_content_batch():
     transformed_path = transform(raw_path)
     new_records = filter_cached_urls(transformed_path)
     url_chunks = chunk(new_records, chunk_size=100)
-    fetched_chunks = fetch_urls(batch_chunk=url_chunks)
-    categorized = categorize.expand(batch_chunk=fetched_chunks)
-    load.expand(batch_chunk=categorized)
+    fetched = fetch_urls(batch_chunk=url_chunks)
+    categorized = categorize.expand(batch_with_texts=fetched)
+    load.expand(batch_rows=categorized)
 
 url_content_batch()
 
