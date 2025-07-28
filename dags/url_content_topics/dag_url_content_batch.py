@@ -117,8 +117,7 @@ def url_content_batch():
         #     print("[WARNING] No data to load. DataFrame is empty.")
         #     return "No data loaded"
         spark = create_spark_session()
-        categorized_df = spark.createDataFrame(batch_rows)
-        new_data = spark.createDataFrame(categorized_df)
+        new_data = spark.createDataFrame(batch_rows)
         load_data(new_data)
         spark.stop()
         print("[LOAD] Data loaded successfully")
@@ -128,7 +127,7 @@ def url_content_batch():
     transformed_path = transform(raw_path)
     new_records = filter_cached_urls(transformed_path)
     url_chunks = chunk(new_records, chunk_size=100)
-    fetched = fetch_urls(batch_chunk=url_chunks)
+    fetched = fetch_urls.expand(batch_chunk=url_chunks)
     categorized = categorize.expand(batch_with_texts=fetched)
     load.expand(batch_rows=categorized)
 
