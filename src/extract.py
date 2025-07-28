@@ -4,7 +4,7 @@ from pyspark.sql.functions import col, lit
 from google.cloud import bigquery
 
 
-def extract_data(spark: SparkSession, project_id: str, dataset_id: str, table_id: str, limit: int = 500):
+def extract_data(spark: SparkSession, project_id: str, dataset_id: str, table_id: str, limit: int = 200):
 
     """
     Extracts data from a BigQuery table using Spark BigQuery connector
