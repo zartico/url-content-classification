@@ -47,33 +47,35 @@ def url_content_batch():
     @task(task_id="extract_data", retries=0, retry_delay=timedelta(minutes=0))
     def extract():
         print("[EXTRACT] Starting data extraction from BigQuery")
-        spark = create_spark_session()
-        raw_df = extract_data(spark, PROJECT_ID, GA4_DATASET_ID, GA4_TABLE_ID)
+        #spark = create_spark_session()
+        raw_df = extract_data(PROJECT_ID, GA4_DATASET_ID, GA4_TABLE_ID)
         temp_path = "/home/airflow/gcs/data/url_content_topics/tmp/raw.parquet"
         raw_df.write.mode("overwrite").parquet(temp_path)
-        spark.stop()
+        #spark.stop()
         print("[EXTRACT] Data written to: ", temp_path)
         return temp_path
 
     @task(task_id="transform_data", retries=0, retry_delay=timedelta(minutes=0))
     def transform(raw_path):
         print("[TRANSFORM] Starting data transformation")
-        spark = create_spark_session()
-        raw_df = spark.read.parquet(raw_path)
+        #spark = create_spark_session()
+        #raw_df = spark.read.parquet(raw_path)
+        raw_df = pd.read_parquet(raw_path)
         print(f"[TRANSFORM] Raw DataFrame loaded with {raw_df.count()} rows")
         transformed_df = transform_data(raw_df)
         temp_path = "/home/airflow/gcs/data/url_content_topics/tmp/transformed.parquet"
         transformed_df.write.mode("overwrite").parquet(temp_path)
-        spark.stop()
+        #spark.stop()
         print("[TRANSFORM] Transformed DataFrame written to: ", temp_path)
         return temp_path
 
     @task(task_id="filter_urls", retries=0, retry_delay=timedelta(minutes=0))
     def filter_cached_urls(transformed_path):
         print("[FILTER] Start filtering cached URLs")
-        spark = create_spark_session()
-        df = spark.read.parquet(transformed_path).toPandas()
-        spark.stop()
+        #spark = create_spark_session()
+        #df = spark.read.parquet(transformed_path).toPandas()
+        #spark.stop()
+        df = pd.read_parquet(transformed_path)
         print(f"[FILTER] Loaded from transformed data with {len(df)} rows")
         uncached_df = filter_cache(df)
         print(f"[FILTER] Filtered cached URLs, remaining {len(uncached_df)} uncached rows")
