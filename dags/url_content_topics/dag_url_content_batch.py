@@ -19,7 +19,7 @@ from src.load import load_data
 from src.extract import extract_data
 from src.transform import transform_data
 from utils.cache import filter_cache
-from utils.web_fetch import fetch_all_pages
+from utils.web_fetch import fetch_all_pages, extract_visible_text
 from src.categorize import categorize_urls
 from src.load import load_data
 
@@ -101,7 +101,8 @@ def url_content_batch():
         urls = [x["page_url"] for x in batch_chunk]
         page_texts = asyncio.run(fetch_all_pages(urls))
         for x in batch_chunk:
-            x["page_text"] = page_texts.get(x["page_url"], "")
+            html = page_texts.get(x["page_url"], "")
+            x["page_text"] = extract_visible_text(html) if html else ""
         print(f"[FETCH] Fetched page text for {len(batch_chunk)} URLs")
         return batch_chunk
 

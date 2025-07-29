@@ -3,6 +3,7 @@ import aiohttp
 import asyncio
 import random
 import requests
+from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
 HEADERS = {
@@ -86,3 +87,10 @@ async def fetch_all_pages(urls: list[str]) -> dict[str, str]:
         results[url] = html if html else "[ERROR] All methods failed"
 
     return results
+
+def extract_visible_text(html: str) -> str:
+    soup = BeautifulSoup(html, "html.parser")
+    # Remove scripts and styles
+    for tag in soup(["script", "style", "noscript"]):
+        tag.decompose()
+    return soup.get_text(separator=" ", strip=True)
