@@ -50,7 +50,8 @@ def url_content_batch():
         #spark = create_spark_session()
         raw_df = extract_data(PROJECT_ID, GA4_DATASET_ID, GA4_TABLE_ID)
         temp_path = "/home/airflow/gcs/data/url_content_topics/tmp/raw.parquet"
-        raw_df.write.mode("overwrite").parquet(temp_path)
+        raw_df.to_parquet(temp_path, index=False)
+        #raw_df.write.mode("overwrite").parquet(temp_path)
         #spark.stop()
         print("[EXTRACT] Data written to: ", temp_path)
         return temp_path
@@ -61,10 +62,11 @@ def url_content_batch():
         #spark = create_spark_session()
         #raw_df = spark.read.parquet(raw_path)
         raw_df = pd.read_parquet(raw_path)
-        print(f"[TRANSFORM] Raw DataFrame loaded with {raw_df.count()} rows")
+        print(f"[TRANSFORM] Raw DataFrame loaded with {len(raw_df)} rows")
         transformed_df = transform_data(raw_df)
         temp_path = "/home/airflow/gcs/data/url_content_topics/tmp/transformed.parquet"
-        transformed_df.write.mode("overwrite").parquet(temp_path)
+        transformed_df.to_parquet(temp_path, index=False)
+        #transformed_df.write.mode("overwrite").parquet(temp_path)
         #spark.stop()
         print("[TRANSFORM] Transformed DataFrame written to: ", temp_path)
         return temp_path
