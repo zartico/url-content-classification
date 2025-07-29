@@ -87,7 +87,7 @@ def url_content_batch():
         print(f"[CHUNK] Created {len(chunks)} chunks")
         return chunks
 
-    @task(task_id="fetch_urls", retries=0, retry_delay=timedelta(minutes=0))
+    @task(task_id="fetch_urls", retries=3, retry_delay=timedelta(minutes=3))
     def fetch_urls(batch_chunk):
         print("[FETCH] Fetching URLs in batch")
         urls = [x["page_url"] for x in batch_chunk]
@@ -97,7 +97,7 @@ def url_content_batch():
         print(f"[FETCH] Fetched page text for {len(batch_chunk)} URLs")
         return batch_chunk
 
-    @task(task_id="categorize_urls", retries=0, retry_delay=timedelta(minutes=0))
+    @task(task_id="categorize_urls", retries=3, retry_delay=timedelta(minutes=3), skip_on_upstream_skip=False)
     def categorize(batch_with_texts):
         print("[CATEGORIZE] Starting URL categorization")
         df_page_text = pd.DataFrame(batch_with_texts)
@@ -109,7 +109,7 @@ def url_content_batch():
         # print(f"[CATEGORIZE] Categorized data written to: {temp_path}")
         # return temp_path
 
-    @task(task_id="load_data", retries=0, retry_delay=timedelta(minutes=0))
+    @task(task_id="load_data", retries=0, retry_delay=timedelta(minutes=0), skip_on_upstream_skip=False)
     def load(batch_rows):
         print("[LOAD] Loading categorized data into BigQuery")
         # categorized_pd_df = pd.read_csv(categorized_path)
