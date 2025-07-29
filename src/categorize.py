@@ -11,7 +11,7 @@ import asyncio
 import time
 
 
-def classify_text(raw_html):
+def classify_text(raw_html, client):
     """ Classify text using Google Cloud Natural Language API."""
 
     try:
@@ -20,9 +20,6 @@ def classify_text(raw_html):
         text = soup.get_text(separator=' ', strip=True)
 
         # Call Google NLP V2 API
-        client = language_v1.LanguageServiceClient(
-            client_options={"quota_project_id": PROJECT_ID}
-        )
         document = language_v1.Document(
             content=text,
             type_=language_v1.Document.Type.PLAIN_TEXT
@@ -42,6 +39,10 @@ def classify_text(raw_html):
 # Main categorization function
 def categorize_urls(df):
     client = bigquery.Client(project=PROJECT_ID)
+
+    nlp_client = language_v1.LanguageServiceClient(
+        client_options={"quota_project_id": PROJECT_ID}
+    )
 
     # Edge case
     if df.empty:
@@ -79,7 +80,7 @@ def categorize_urls(df):
         try: # Classify the text using NLP
             # Check quota before proceeding 
             # check_and_increment_quota() ** UNCOMMENT THIS LINE IN PRODUCTION **
-            categories = classify_text(page_text)
+            categories = classify_text(page_text, nlp_client)
             print(f"[DEBUG] Categories returned for {page_url}: {categories}")
             if categories:
                 top_cat = categories[0]
