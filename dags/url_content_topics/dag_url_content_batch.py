@@ -6,6 +6,7 @@ from datetime import timedelta
 from google.cloud import bigquery
 import pandas as pd
 import asyncio
+import uuid
 import sys
 import os
 
@@ -87,35 +88,87 @@ def url_content_batch():
         print(f"[FILTER] Filtered cached URLs, remaining {len(uncached_df)} uncached rows")
         return uncached_df.to_dict(orient="records")
     
-    @task(task_id="chunk_urls", retries=0, retry_delay=timedelta(minutes=0))
-    def chunk(batch: list, chunk_size: int = 5):
-        """Yield successive n-sized chunks from batch."""
-        print(f"[CHUNK] Splitting batch of {len(batch)} into chunks of size {chunk_size}")
-        chunks = [batch[i:i + chunk_size] for i in range(0, len(batch), chunk_size)]
-        print(f"[CHUNK] Created {len(chunks)} chunks")
-        return chunks
+    # @task(task_id="chunk_urls", retries=0, retry_delay=timedelta(minutes=0))
+    # def chunk(batch: list, chunk_size: int = 5):
+    #     """Yield successive n-sized chunks from batch."""
+    #     print(f"[CHUNK] Splitting batch of {len(batch)} into chunks of size {chunk_size}")
+    #     chunks = [batch[i:i + chunk_size] for i in range(0, len(batch), chunk_size)]
+    #     print(f"[CHUNK] Created {len(chunks)} chunks")
+    #     return chunks
+    
+    @task(task_id="stage_batches_bq", retries=0, retry_delay=timedelta(minutes=0))
+    def stage_batches_to_bq(records, chunk_size: int = 5) -> list[str]:
+        """Chunks records and inserts them into BQ with unique batch_id"""
+        bq_client = bigquery.Client()
+        staging_table = f"{PROJECT_ID}.{BQ_DATASET_ID}.staging_url_batches"
+        batch_ids = []
+
+        for i in range(0, len(records), chunk_size):
+            chunk = records[i:i+chunk_size]
+            batch_id = str(uuid.uuid4())
+            for r in chunk:
+                r["batch_id"] = batch_id
+            df = pd.DataFrame(chunk)
+            bq_client.load_table_from_dataframe(df, staging_table).result()
+            batch_ids.append(batch_id)
+
+        return batch_ids
 
     @task(task_id="fetch_urls", retries=3, retry_delay=timedelta(minutes=3))
-    def fetch_urls(batch_chunk):
+    def fetch_urls(batch_id: str):
         print("[FETCH] Fetching URLs in batch")
-        urls = [x["page_url"] for x in batch_chunk]
+        client = bigquery.Client()
+        staging_table = f"{PROJECT_ID}.{BQ_DATASET_ID}.staging_url_batches"
+        df = client.query(f"""
+            SELECT * FROM `{staging_table}` WHERE batch_id = '{batch_id}'
+        """).to_dataframe()
+
+        urls = df["page_url"].tolist()
         page_texts = asyncio.run(fetch_all_pages(urls))
-        for x in batch_chunk:
-            html = page_texts.get(x["page_url"], "")
-            x["page_text"] = extract_visible_text(html) if html else ""
-        print(f"[FETCH] Fetched page text for {len(batch_chunk)} URLs")
 
-        import json
-        payload = json.dumps(batch_chunk)
-        print(f"[FETCH] Payload size: {len(payload)} bytes")
+        df["page_text"] = df["page_url"].apply(
+            lambda url: extract_visible_text(page_texts.get(url, ""))
+        )
+        # Overwrite existing rows for this batch
+        job_config = bigquery.LoadJobConfig(
+        write_disposition="WRITE_TRUNCATE",
+        schema_update_options=["ALLOW_FIELD_ADDITION"],
+        )
 
-        return batch_chunk
+        # Limit scope to this batch
+        temp_table = f"{staging_table}_temp_{batch_id.replace('-', '_')}"
+
+        print("[FETCH] Fetched page text for URLs")
+
+        client.load_table_from_dataframe(df, staging_table).result()
+        return batch_id 
+        # return df.to_dict(orient="records")
+        # print("[FETCH] Fetching URLs in batch")
+        # urls = [x["page_url"] for x in batch_chunk]
+        # page_texts = asyncio.run(fetch_all_pages(urls))
+        # for x in batch_chunk:
+        #     html = page_texts.get(x["page_url"], "")
+        #     x["page_text"] = extract_visible_text(html) if html else ""
+        # print(f"[FETCH] Fetched page text for {len(batch_chunk)} URLs")
+
+        # import json
+        # payload = json.dumps(batch_chunk)
+        # print(f"[FETCH] Payload size: {len(payload)} bytes")
+
+        # return batch_chunk
 
     @task(task_id="categorize_urls", retries=3, retry_delay=timedelta(minutes=3), skip_on_upstream_skip=False)
     def categorize(batch_with_texts):
         print("[CATEGORIZE] Starting URL categorization")
-        df_page_text = pd.DataFrame(batch_with_texts)
-        categorized_df = categorize_urls(df_page_text)
+        #df_page_text = pd.DataFrame(batch_with_texts)
+        client = bigquery.Client()
+        table_id = f"{PROJECT_ID}.{BQ_DATASET_ID}.staging_url_batches"
+        df = client.query(f"""
+            SELECT * FROM `{table_id}`
+            WHERE batch_id = '{batch_with_texts}' AND page_text IS NOT NULL
+        """).to_dataframe()
+
+        categorized_df = categorize_urls(df)
         print(f"[CATEGORIZE] Categorized {len(categorized_df)} URLs")
         return categorized_df.to_dict(orient="records")
         # temp_path = "/home/airflow/gcs/data/url_content_topics/tmp/categorized.csv"
@@ -140,8 +193,10 @@ def url_content_batch():
     raw_path = extract()
     transformed_path = transform(raw_path)
     new_records = filter_cached_urls(transformed_path)
-    url_chunks = chunk(new_records, chunk_size=5)
-    fetched = fetch_urls.expand(batch_chunk=url_chunks)
+    batch_ids = stage_batches_to_bq(new_records)
+    #url_chunks = chunk(new_records, chunk_size=5)
+
+    fetched = fetch_urls.expand(batch_id=batch_ids)
     categorized = categorize.expand(batch_with_texts=fetched)
     load.expand(batch_rows=categorized)
 
