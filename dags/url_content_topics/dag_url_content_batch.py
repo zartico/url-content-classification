@@ -104,6 +104,11 @@ def url_content_batch():
             html = page_texts.get(x["page_url"], "")
             x["page_text"] = extract_visible_text(html) if html else ""
         print(f"[FETCH] Fetched page text for {len(batch_chunk)} URLs")
+
+        import json
+        payload = json.dumps(batch_chunk)
+        print(f"[FETCH] Payload size: {len(payload)} bytes")
+
         return batch_chunk
 
     @task(task_id="categorize_urls", retries=3, retry_delay=timedelta(minutes=3), skip_on_upstream_skip=False)
