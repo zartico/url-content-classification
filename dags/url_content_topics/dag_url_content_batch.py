@@ -88,7 +88,7 @@ def url_content_batch():
         return uncached_df.to_dict(orient="records")
     
     @task(task_id="chunk_urls", retries=0, retry_delay=timedelta(minutes=0))
-    def chunk(batch: list, chunk_size: int = 25):
+    def chunk(batch: list, chunk_size: int = 5):
         """Yield successive n-sized chunks from batch."""
         print(f"[CHUNK] Splitting batch of {len(batch)} into chunks of size {chunk_size}")
         chunks = [batch[i:i + chunk_size] for i in range(0, len(batch), chunk_size)]
@@ -140,7 +140,7 @@ def url_content_batch():
     raw_path = extract()
     transformed_path = transform(raw_path)
     new_records = filter_cached_urls(transformed_path)
-    url_chunks = chunk(new_records, chunk_size=25)
+    url_chunks = chunk(new_records, chunk_size=5)
     fetched = fetch_urls.expand(batch_chunk=url_chunks)
     categorized = categorize.expand(batch_with_texts=fetched)
     load.expand(batch_rows=categorized)

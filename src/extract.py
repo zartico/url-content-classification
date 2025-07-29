@@ -5,7 +5,7 @@ from google.cloud import bigquery
 import pandas as pd
 
 
-def extract_data(project_id: str, dataset_id: str, table_id: str, limit: int = 100):
+def extract_data(project_id: str, dataset_id: str, table_id: str, limit: int = 20):
 
     """
     Extracts data from a BigQuery table using Spark BigQuery connector
