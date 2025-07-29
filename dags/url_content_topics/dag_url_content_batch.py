@@ -49,27 +49,30 @@ def url_content_batch():
         print("[EXTRACT] Starting data extraction from BigQuery")
         #spark = create_spark_session()
         raw_df = extract_data(PROJECT_ID, GA4_DATASET_ID, GA4_TABLE_ID)
-        temp_path = "/home/airflow/gcs/data/url_content_topics/tmp/raw.parquet"
-        raw_df.to_parquet(temp_path, index=False)
+        print(f"[EXTRACT] Extracted {len(raw_df)} rows from BigQuery")
+        return raw_df.to_dict(orient="records")
+        #temp_path = "/home/airflow/gcs/data/url_content_topics/tmp/raw.parquet"
+        #raw_df.to_parquet(temp_path, index=False)
         #raw_df.write.mode("overwrite").parquet(temp_path)
         #spark.stop()
-        print("[EXTRACT] Data written to: ", temp_path)
-        return temp_path
+        #return temp_path
 
     @task(task_id="transform_data", retries=0, retry_delay=timedelta(minutes=0))
     def transform(raw_path):
         print("[TRANSFORM] Starting data transformation")
         #spark = create_spark_session()
         #raw_df = spark.read.parquet(raw_path)
-        raw_df = pd.read_parquet(raw_path)
+        #raw_df = pd.read_parquet(raw_path)
+        raw_df = pd.DataFrame(raw_path)
         print(f"[TRANSFORM] Raw DataFrame loaded with {len(raw_df)} rows")
         transformed_df = transform_data(raw_df)
-        temp_path = "/home/airflow/gcs/data/url_content_topics/tmp/transformed.parquet"
-        transformed_df.to_parquet(temp_path, index=False)
+        print(f"[TRANSFORM] Transformed/Cleaned {len(transformed_df)} rows")
+        return transformed_df.to_dict(orient="records")
+        #temp_path = "/home/airflow/gcs/data/url_content_topics/tmp/transformed.parquet"
+        #transformed_df.to_parquet(temp_path, index=False)
         #transformed_df.write.mode("overwrite").parquet(temp_path)
         #spark.stop()
-        print("[TRANSFORM] Transformed DataFrame written to: ", temp_path)
-        return temp_path
+        #return temp_path
 
     @task(task_id="filter_urls", retries=0, retry_delay=timedelta(minutes=0))
     def filter_cached_urls(transformed_path):
@@ -77,7 +80,8 @@ def url_content_batch():
         #spark = create_spark_session()
         #df = spark.read.parquet(transformed_path).toPandas()
         #spark.stop()
-        df = pd.read_parquet(transformed_path)
+        #df = pd.read_parquet(transformed_path)
+        df = pd.DataFrame(transformed_path)
         print(f"[FILTER] Loaded from transformed data with {len(df)} rows")
         uncached_df = filter_cache(df)
         print(f"[FILTER] Filtered cached URLs, remaining {len(uncached_df)} uncached rows")
