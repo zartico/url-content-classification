@@ -44,7 +44,7 @@ def create_spark_session():
     catchup=False,
     tags=["url-content"],
 )
-def url_content_batch():
+def url_content_categorization():
     @task(task_id="extract_data", retries=0, retry_delay=timedelta(minutes=0))
     def extract():
         print("[EXTRACT] Starting data extraction from BigQuery")
@@ -200,5 +200,5 @@ def url_content_batch():
     categorized = categorize.expand(batch_with_texts=fetched)
     load.expand(batch_rows=categorized)
 
-url_content_batch()
+url_content_categorization()
 
