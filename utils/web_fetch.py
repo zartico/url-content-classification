@@ -45,6 +45,7 @@ def fetch_requests(url: str) -> tuple[str, str | None]:
 
 
 async def fetch_playwright(url: str) -> tuple[str, str | None]:
+    browser = None
     try:
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
@@ -54,37 +55,62 @@ async def fetch_playwright(url: str) -> tuple[str, str | None]:
             content = await page.content()
             status = response.status if response else "?"
             print(f"[PLAYWRIGHT] {url} - {status}")
-            await browser.close()
             return url, content
     except PlaywrightTimeoutError:
         print(f"[PLAYWRIGHT-TIMEOUT] {url}")
     except Exception as e:
         print(f"[PLAYWRIGHT-ERROR] {url}: {e}")
+    finally:
+        if browser:
+            try:
+                await browser.close()
+            except Exception as e:
+                print(f"[PLAYWRIGHT-CLEANUP-ERROR] {url}: {e}")
+    
     return url, None
 
 
-async def fetch_all_pages(urls: list[str]) -> dict[str, str]:
+async def fetch_all_pages(urls: list[str], max_concurrent: int = 2) -> dict[str, str]:
     results = {}
-    connector = aiohttp.TCPConnector(limit=10)
 
-    async with aiohttp.ClientSession(connector=connector) as session:
-        aio_tasks = [fetch_aiohttp(session, url) for url in urls]
-        aio_results = await asyncio.gather(*aio_tasks)
+    semaphore = asyncio.Semaphore(max_concurrent)
+    connector = aiohttp.TCPConnector(limit=max_concurrent, limit_per_host=2)
 
-    for url, html in aio_results:
-        if html:
-            results[url] = html
-            continue
+    async def fetch_with_semaphore(session, url):
+        async with semaphore:
+            return await fetch_aiohttp(session, url)
+    
+    try:
+        async with aiohttp.ClientSession(connector=connector) as session:
+            aio_tasks = [fetch_with_semaphore(session, url) for url in urls]
+            aio_results = await asyncio.gather(*aio_tasks, return_exceptions=True)
 
-        # Try requests
-        url, html = fetch_requests(url)
-        if html:
-            results[url] = html
-            continue
+        for result in aio_results:
+            if isinstance(result, Exception):
+                print(f"[FETCH-ERROR] Exception in async gather: {result}")
+                continue
 
-        # Try Playwright
-        url, html = await fetch_playwright(url)
-        results[url] = html if html else "[ERROR] All methods failed"
+            url, html = result
+            if html:
+                results[url] = html
+                continue
+
+            # Try requests
+            url, html = fetch_requests(url)
+            if html:
+                results[url] = html
+                continue
+
+            # Try Playwright
+            url, html = await fetch_playwright(url)
+            results[url] = html if html else "[ERROR] All methods failed"
+
+    except Exception as e:
+        print(f"[FETCH-ALL-ERROR] Critical error in fetch_all_pages: {e}")
+        # Return partial results if available
+        for url in urls:
+            if url not in results:
+                results[url] = "[ERROR] Critical fetch failure"
 
     return results
 

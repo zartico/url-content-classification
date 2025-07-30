@@ -124,7 +124,7 @@ def url_content_batch():
         """).to_dataframe()
 
         urls = df["page_url"].tolist()
-        page_texts = asyncio.run(fetch_all_pages(urls))
+        page_texts = asyncio.run(fetch_all_pages(urls, max_concurrent=2))
 
         df["page_text"] = df["page_url"].apply(
             lambda url: extract_visible_text(page_texts.get(url, ""))
