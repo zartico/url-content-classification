@@ -65,7 +65,7 @@ def categorize_urls(df):
         page_text = row.get("page_text", "")
 
         url_hash = hash_url(trimmed_url)
-        now_str = datetime.now(timezone.utc).isoformat()
+        now_ts = datetime.now(timezone.utc)
 
         # If no text or not long enough for NLP API, skip this URL
         if not page_text or len(page_text.split()) < 20:
@@ -74,8 +74,8 @@ def categorize_urls(df):
 
         processed_indexes.append(idx)
         url_hashes.append(url_hash)
-        created_ats.append(now_str)
-        last_accesseds.append(now_str)
+        created_ats.append(now_ts)
+        last_accesseds.append(now_ts)
         
         try: # Classify the text using NLP
             # Check quota before proceeding 
