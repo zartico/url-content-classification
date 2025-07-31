@@ -183,10 +183,16 @@ def url_content():
         # if categorized_pd_df.empty:
         #     print("[WARNING] No data to load. DataFrame is empty.")
         #     return "No data loaded"
-        spark = create_spark_session()
-        new_data = spark.createDataFrame(batch_rows)
-        load_data(new_data)
-        spark.stop()
+        # spark = create_spark_session()
+        # new_data = spark.createDataFrame(batch_rows)
+        # load_data(new_data)
+        # spark.stop()
+        if not batch_rows:
+            print("[LOAD] No data to load.")
+            return "Skipped"
+        
+        df = pd.DataFrame(batch_rows)
+        load_data(df)
         print("[LOAD] Data loaded successfully")
         return "Loaded"
 
