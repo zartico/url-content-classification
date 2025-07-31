@@ -56,7 +56,7 @@ def categorize_urls(df):
     # Columns to be added to the DataFrame
     zartico_categories, content_topics, confidences, review_flags, raw_categories = [], [], [], [], []
     url_hashes, created_ats, last_accesseds, view_counts= [], [], [], []
-    processed_indexes = [], []
+    processed_indexes = []
 
     for idx, row in df.iterrows():
         page_url = row["page_url"]
