@@ -24,9 +24,12 @@ async def fetch_aiohttp(session, url: str) -> tuple[str, str | None]:
     try:
         async with session.get(url, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=10)) as resp:
             print(f"[AIOHTTP] {url} - {resp.status}")
-            if resp.status in (200, 410):
-                return url, await resp.text()
-            return url, None
+            content = await resp.text()
+            print(f"[AIOHTTP] Fetched {len(content)} characters from {url}")
+            return url, content
+    except (aiohttp.ClientTimeout, aiohttp.ClientConnectorError, asyncio.TimeoutError) as e:
+        print(f"[AIOHTTP-TIMEOUT] {url}: {e}")
+        return url, None
     except Exception as e:
         print(f"[AIOHTTP-ERROR] {url}: {e}")
         return url, None
@@ -36,8 +39,10 @@ def fetch_requests(url: str) -> tuple[str, str | None]:
     try:
         r = requests.get(url, headers=HEADERS, timeout=10)
         print(f"[REQUESTS] {url} - {r.status_code}")
-        if r.status_code in (200, 410):
-            return url, r.text
+        print(f"[REQUESTS] {url} fetched with {len(r.text)} characters")
+        return url, r.text
+    except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+        print(f"[REQUESTS-TIMEOUT] {url}: {e}")
         return url, None
     except Exception as e:
         print(f"[REQUESTS-ERROR] {url}: {e}")
@@ -55,6 +60,7 @@ async def fetch_playwright(url: str) -> tuple[str, str | None]:
             content = await page.content()
             status = response.status if response else "?"
             print(f"[PLAYWRIGHT] {url} - {status}")
+            print(f"[PLAYWRIGHT] Fetched {len(content)} characters from {url}")
             return url, content
     except PlaywrightTimeoutError:
         print(f"[PLAYWRIGHT-TIMEOUT] {url}")
@@ -64,6 +70,7 @@ async def fetch_playwright(url: str) -> tuple[str, str | None]:
         if browser:
             try:
                 await browser.close()
+                print(f"[PLAYWRIGHT] Browser closed for {url}")
             except Exception as e:
                 print(f"[PLAYWRIGHT-CLEANUP-ERROR] {url}: {e}")
     
@@ -87,7 +94,7 @@ async def fetch_all_pages(urls: list[str], max_concurrent: int = 2) -> dict[str,
 
         for result in aio_results:
             if isinstance(result, Exception):
-                print(f"[FETCH-ERROR] Exception in async gather: {result}")
+                print(f"[FETCH-ERROR] Exception in async aiohttp gather: {result}")
                 continue
 
             url, html = result
@@ -96,22 +103,26 @@ async def fetch_all_pages(urls: list[str], max_concurrent: int = 2) -> dict[str,
                 continue
 
             # Try requests
+            print(f"[FETCH] AIOHTTP failed for {url}, trying requests")
             url, html = fetch_requests(url)
             if html:
                 results[url] = html
                 continue
 
             # Try Playwright
+            print(f"[FETCH] Requests failed for {url}, trying Playwright")
             url, html = await fetch_playwright(url)
             results[url] = html if html else "[ERROR] All methods failed"
 
     except Exception as e:
-        print(f"[FETCH-ALL-ERROR] Critical error in fetch_all_pages: {e}")
-        # Return partial results if available
+        print(f"[FETCH-ALL-ERROR] Unexpected error in fetch_all_pages: {e}")
+        import traceback
+        print(traceback.format_exc())
         for url in urls:
             if url not in results:
                 results[url] = "[ERROR] Critical fetch failure"
 
+    print(f"[FETCH] Completed. Fetched content for {len(results)} URLs")
     return results
 
 def extract_visible_text(html: str) -> str:

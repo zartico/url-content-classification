@@ -44,7 +44,7 @@ def create_spark_session():
     catchup=False,
     tags=["url-content"],
 )
-def url_content_categorization():
+def url_content():
     @task(task_id="extract_data", retries=0, retry_delay=timedelta(minutes=0))
     def extract():
         print("[EXTRACT] Starting data extraction from BigQuery")
@@ -157,7 +157,7 @@ def url_content_categorization():
 
         # return batch_chunk
 
-    @task(task_id="categorize_urls", retries=3, retry_delay=timedelta(minutes=3), skip_on_upstream_skip=False)
+    @task(task_id="categorize_urls", retries=3, retry_delay=timedelta(minutes=3))
     def categorize(batch_with_texts):
         print("[CATEGORIZE] Starting URL categorization")
         #df_page_text = pd.DataFrame(batch_with_texts)
@@ -176,7 +176,7 @@ def url_content_categorization():
         # print(f"[CATEGORIZE] Categorized data written to: {temp_path}")
         # return temp_path
 
-    @task(task_id="load_data", retries=0, retry_delay=timedelta(minutes=0), skip_on_upstream_skip=False)
+    @task(task_id="load_data", retries=0, retry_delay=timedelta(minutes=0))
     def load(batch_rows):
         print("[LOAD] Loading categorized data into BigQuery")
         # categorized_pd_df = pd.read_csv(categorized_path)
@@ -200,5 +200,5 @@ def url_content_categorization():
     categorized = categorize.expand(batch_with_texts=fetched)
     load.expand(batch_rows=categorized)
 
-url_content_categorization()
+url_content()
 
