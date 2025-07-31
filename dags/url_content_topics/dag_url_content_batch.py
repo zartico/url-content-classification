@@ -192,6 +192,10 @@ def url_content():
             return "Skipped"
         
         df = pd.DataFrame(batch_rows)
+        # Convert string timestamps back to datetime for BigQuery
+        df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce")
+        df["last_accessed"] = pd.to_datetime(df["last_accessed"], errors="coerce")
+        
         load_data(df)
         print("[LOAD] Data loaded successfully")
         return "Loaded"

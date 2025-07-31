@@ -65,7 +65,7 @@ def categorize_urls(df):
         page_text = row.get("page_text", "")
 
         url_hash = hash_url(trimmed_url)
-        now_ts = datetime.now(timezone.utc)
+        now_ts = datetime.now(timezone.utc).isoformat()
 
         # If no text or not long enough for NLP API, skip this URL
         if not page_text or len(page_text.split()) < 20:
