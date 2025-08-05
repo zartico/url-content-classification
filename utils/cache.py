@@ -7,15 +7,20 @@ import pandas as pd
 def hash_url(url):
     return sha256(url.encode("utf-8")).hexdigest()
 
-def check_cache_for_urls(url_hashes, project_id, dataset_id, table_id):
+def get_result_columns() -> list[str]:
+    return [
+        "url_hash", "created_at", "trimmed_page_url", "site", "page_url",
+        "content_topic", "prediction_confidence", "review_flag",
+        "nlp_raw_categories", "client_id", "last_accessed", "view_count"
+    ]
+
+def check_cache_for_urls(client, url_hashes, project_id, dataset_id, table_id):
     """
     Query BigQuery to retrieve cached classification results for a list of URL hashes.
     Returns a dict mapping url_hash → row data
     """
     if not url_hashes:
         return {}
-    
-    client = bigquery.Client(project=project_id)
 
     query = f"""
         SELECT url_hash, zartico_category, content_topic, prediction_confidence, review_flag, nlp_raw_categories,
@@ -28,59 +33,58 @@ def check_cache_for_urls(url_hashes, project_id, dataset_id, table_id):
     cache = {row.url_hash: row for row in results}
     return cache
 
-def update_bq_cache(client, row, project_id, dataset_id, table_id):
+def update_bq_cache_bulk(client, url_hashes, project_id, dataset_id, table_id):
+    """Bulk update last_accessed and view_count for cached URLs in BigQuery."""""
     table = f"{project_id}.{dataset_id}.{table_id}"
 
-    url_hash = row["url_hash"]
-
+    url_hash_values = ",\n        ".join([f"('{h}')" for h in url_hashes])
+    
     merge_query = f"""
-    MERGE {table} T
-    USING (SELECT '{url_hash}' AS url_hash) S
-    ON T.url_hash = S.url_hash
-    WHEN MATCHED THEN
-      UPDATE SET
-        T.last_accessed = CURRENT_TIMESTAMP(),
-        T.view_count = IFNULL(T.view_count, 0) + 1
+        MERGE `{table}` T
+        USING (SELECT url_hash FROM UNNEST([
+            {url_hash_values}
+        ]) AS url_hash) S
+        ON T.url_hash = S.url_hash
+        WHEN MATCHED THEN
+          UPDATE SET
+            T.last_accessed = CURRENT_TIMESTAMP(),
+            T.view_count = IFNULL(T.view_count, 0) + 1
     """
+
 
     try:
         client.query(merge_query).result()
-        print(f"[DEBUG] Updated cache for {url_hash}")
+        print(f"[DEBUG] Bulk updated cache for {len(url_hashes)} cached entries")
     except Exception as e:
-        print(f"[ERROR] MERGE failed for {url_hash}: {e}")
+        print(f"[ERROR] Bulk MERGE failed for cached entries: {e}")
 
-def get_result_columns():
-    return [
-        "url_hash", "created_at", "trimmed_page_url", "site", "page_url",
-        "content_topic", "prediction_confidence", "review_flag",
-        "nlp_raw_categories", "client_id", "last_accessed", "view_count"
-    ]
 
-def filter_cache(df):
+def filter_cache(df: pd.DataFrame) -> pd.DataFrame:
+    """ Filter out URLs that are already cached in BigQuery.
+    Updates last_accessed and view_count for cached entries.
+    Returns a DataFrame with uncached URLs ready for processing.
+    """
     client = bigquery.Client(project=PROJECT_ID)
 
     # Edge cases
     if df.empty or "trimmed_page_url" not in df.columns:
+        print("[FILTER] Input DataFrame is empty or missing 'trimmed_page_url'")
         return pd.DataFrame(columns=get_result_columns())
 
-    trimmed_urls = df["trimmed_page_url"].tolist() # For hashing
-    if not trimmed_urls:
-        return pd.DataFrame(columns=get_result_columns())
-    
-    url_hashes_all = [hash_url(url) for url in trimmed_urls]
-    if not url_hashes_all:
-        return pd.DataFrame(columns=get_result_columns())
-    
-    # Check existing cache in bulk
-    cached_results = check_cache_for_urls(url_hashes_all, PROJECT_ID, BQ_DATASET_ID, BQ_TABLE_ID)
+    # Compute hashes once and add to dataframe
+    df["url_hash"] = df["trimmed_page_url"].apply(hash_url)
 
-    df["is_cached"] = df["trimmed_page_url"].apply(lambda u: hash_url(u) in cached_results)
-    for idx, row in df[df["is_cached"]].iterrows():
-        url_hash = hash_url(row["trimmed_page_url"])
-        update_bq_cache(client, {
-            "url_hash": url_hash,
-            # Only view_count and last_accessed are updated in your merge query
-        }, PROJECT_ID, BQ_DATASET_ID, BQ_TABLE_ID)
+    all_hashes = df["url_hash"].tolist()
+    if not all_hashes:
+        print("[FILTER] No URL hashes to check.")
+        return pd.DataFrame(columns=get_result_columns())
+
+    cached_results = check_cache_for_urls(client, all_hashes, PROJECT_ID, BQ_DATASET_ID, BQ_TABLE_ID)
+    df["is_cached"] = df["url_hash"].apply(lambda h: h in cached_results)
+
+    # Bulk update access metadata for cached entries
+    cached_hashes = df[df["is_cached"]]["url_hash"].tolist()
+    update_bq_cache_bulk(client, cached_hashes, PROJECT_ID, BQ_DATASET_ID, BQ_TABLE_ID)
 
     # Filter out cached rows
     uncached_df = df[~df["is_cached"]].copy()
@@ -88,5 +92,6 @@ def filter_cache(df):
         print("[INFO] All URLs are cached. No uncached URLs to process.")
         return pd.DataFrame(columns=get_result_columns())
 
+    print(f"[FILTER] {len(cached_hashes)} URLs were cached. {len(uncached_df)} URLs remain to process.")
     return uncached_df
 
