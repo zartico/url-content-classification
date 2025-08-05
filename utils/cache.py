@@ -91,6 +91,9 @@ def filter_cache(df: pd.DataFrame) -> pd.DataFrame:
     if uncached_df.empty:
         print("[INFO] All URLs are cached. No uncached URLs to process.")
         return pd.DataFrame(columns=get_result_columns())
+    
+    # Remove temporary columns that shouldn't be in the final output
+    uncached_df = uncached_df.drop(columns=["url_hash", "is_cached"], errors="ignore")
 
     print(f"[FILTER] {len(cached_hashes)} URLs were cached. {len(uncached_df)} URLs remain to process.")
     return uncached_df
