@@ -24,6 +24,10 @@ from utils.web_fetch import fetch_all_pages, extract_visible_text
 from src.categorize import categorize_urls
 from src.load import load_data
 
+BATCH_SIZE = 50
+TOTAL_URLS = 200
+MAX_DYNAMIC_TASKS = 500
+
 def create_spark_session():
     """Create Spark session with BigQuery connector"""
     from pyspark.sql import SparkSession
@@ -49,7 +53,7 @@ def url_content():
     def extract():
         print("[EXTRACT] Starting data extraction from BigQuery")
         #spark = create_spark_session()
-        raw_df = extract_data(PROJECT_ID, GA4_DATASET_ID, GA4_TABLE_ID)
+        raw_df = extract_data(PROJECT_ID, GA4_DATASET_ID, GA4_TABLE_ID, TOTAL_URLS)
         print(f"[EXTRACT] Extracted {len(raw_df)} rows from BigQuery")
         return raw_df.to_dict(orient="records")
         #temp_path = "/home/airflow/gcs/data/url_content_topics/tmp/raw.parquet"
@@ -195,7 +199,7 @@ def url_content():
         # Convert string timestamps back to datetime for BigQuery
         df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce")
         df["last_accessed"] = pd.to_datetime(df["last_accessed"], errors="coerce")
-        
+
         load_data(df)
         print("[LOAD] Data loaded successfully")
         return "Loaded"
