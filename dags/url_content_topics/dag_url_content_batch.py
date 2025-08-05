@@ -101,14 +101,14 @@ def url_content():
     #     return chunks
     
     @task(task_id="stage_batches_bq", retries=0, retry_delay=timedelta(minutes=0))
-    def stage_batches_to_bq(records, chunk_size: int = 5) -> list[str]:
+    def stage_batches_to_bq(records, batch_size: int = BATCH_SIZE) -> list[str]:
         """Chunks records and inserts them into BQ with unique batch_id"""
         bq_client = bigquery.Client()
         staging_table = f"{PROJECT_ID}.{BQ_DATASET_ID}.staging_url_batches"
         batch_ids = []
 
-        for i in range(0, len(records), chunk_size):
-            chunk = records[i:i+chunk_size]
+        for i in range(0, len(records), batch_size):
+            chunk = records[i:i+batch_size]
             batch_id = str(uuid.uuid4())
             for r in chunk:
                 r["batch_id"] = batch_id
@@ -116,6 +116,7 @@ def url_content():
             bq_client.load_table_from_dataframe(df, staging_table).result()
             batch_ids.append(batch_id)
 
+        print(f"[STAGE] Created {len(batch_ids)} batches of size ~{batch_size}")
         return batch_ids
 
     @task(task_id="fetch_urls", retries=3, retry_delay=timedelta(minutes=3))
