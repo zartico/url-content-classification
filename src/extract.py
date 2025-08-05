@@ -38,6 +38,6 @@ def extract_data(project_id: str, dataset_id: str, table_id: str, limit: int):
     #     .option("materializationDataset", dataset_id) \
     #     .load()
     
-    print(f"[INFO] Extracted {df.count()} rows from BigQuery")
+    print(f"[INFO] Extracted {len(df)} rows from BigQuery")
     return df
 

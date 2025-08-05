@@ -2,7 +2,7 @@ from config.project_config import PROJECT_ID, BQ_DATASET_ID, BQ_TABLE_ID
 from utils.cache import hash_url, check_cache_for_urls, update_bq_cache, get_result_columns
 from utils.web_fetch import fetch_all_pages
 from utils.category_mapping import map_to_zartico_category
-from utils.utils import is_homepage
+from utils.utils import is_homepage, check_and_increment_quota
 from google.cloud import language_v1, bigquery
 from bs4 import BeautifulSoup
 from datetime import datetime, timezone
@@ -79,7 +79,7 @@ def categorize_urls(df):
         
         try: # Classify the text using NLP
             # Check quota before proceeding 
-            # check_and_increment_quota() ** UNCOMMENT THIS LINE IN PRODUCTION **
+            check_and_increment_quota()
             categories = classify_text(page_text, nlp_client)
             print(f"[DEBUG] Categories returned for {page_url}: {categories}")
             if categories:

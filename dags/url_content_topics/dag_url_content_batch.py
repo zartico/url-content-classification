@@ -162,7 +162,7 @@ def url_content():
 
         # return batch_chunk
 
-    @task(task_id="categorize_urls", retries=3, retry_delay=timedelta(minutes=3))
+    @task(task_id="categorize_urls", retries=3, retry_delay=timedelta(minutes=3), max_active_tis_per_dag=5)
     def categorize(batch_with_texts):
         print("[CATEGORIZE] Starting URL categorization")
         #df_page_text = pd.DataFrame(batch_with_texts)
