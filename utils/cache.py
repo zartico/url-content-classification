@@ -113,10 +113,11 @@ def filter_cache_spark(spark, df: DataFrame) -> DataFrame:
         print("[FILTER] Input DataFrame missing 'trimmed_page_url'")
         return spark.createDataFrame([], schema=get_result_columns())
 
-    # Step 1: Add url_hash column using Spark-native SHA256
-    df = df.withColumn("url_hash", sha2(col("trimmed_page_url"), 256))
+    # Step 1: Generate url_hash using Spark sha256
+    df = df.withColumn("url_hash", sha2(col("trimmed_page_url").cast(StringType()), 256))
+    df = df.alias("main")
 
-    # Step 2: Load cached URL hashes from BigQuery
+    # Step 2: Load cache table from BigQuery
     cached_df = spark.read \
         .format("bigquery") \
         .option("table", f"{PROJECT_ID}.{BQ_DATASET_ID}.{BQ_TABLE_ID}") \
@@ -124,30 +125,28 @@ def filter_cache_spark(spark, df: DataFrame) -> DataFrame:
         .select("url_hash") \
         .alias("cached")
 
-    # Step 3: Left join to flag cached URLs
-    df_joined = df.alias("main").join(
-        cached_df,
-        on=df["url_hash"] == col("cached.url_hash"),
-        how="left_outer"
-    )
-
+    # Step 3: Left join and identify cached rows
+    df_joined = df.join(cached_df, on="url_hash", how="left_outer")
     df_with_flag = df_joined.withColumn("is_cached", col("cached.url_hash").isNotNull())
 
-    # Step 4: Extract and update cached entries
+    # Step 4: Extract and update cached URL hashes
     cached_hashes = (
         df_with_flag.filter(col("is_cached"))
         .select("url_hash")
         .distinct()
-        .toPandas()["url_hash"]
-        .tolist()
+        .rdd.flatMap(lambda row: row)
+        .collect()
+        # .toPandas()["url_hash"]
+        # .tolist()
     )
 
     if cached_hashes:
         client = bigquery.Client(project=PROJECT_ID)
         update_bq_cache_bulk(client, cached_hashes, PROJECT_ID, BQ_DATASET_ID, BQ_TABLE_ID)
 
-    # Step 5: Drop cached and return uncached rows
+    # Step 5: Filter out cached rows
     uncached_df = df_with_flag.filter(~col("is_cached")).drop("url_hash", "is_cached")
 
-    print(f"[FILTER] {len(cached_hashes)} URLs were cached. {uncached_df.count()} remain to process.")
+    remaining = uncached_df.count()
+    print(f"[FILTER] {len(cached_hashes)} URLs were cached. {remaining} URLs remain to process.")
     return uncached_df
