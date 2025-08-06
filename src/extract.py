@@ -39,6 +39,6 @@ def extract_data(spark, project_id: str, dataset_id: str, table_id: str, limit: 
         .limit(limit)
     
     # print(f"[INFO] Extracted {len(df)} rows from BigQuery")
-    print(f"[INFO] Extracted {df.count()} rows from BigQuery")
+    # print(f"[INFO] Extracted {df.count()} rows from BigQuery")
     return df
 

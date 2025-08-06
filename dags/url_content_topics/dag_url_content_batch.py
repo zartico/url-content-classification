@@ -62,8 +62,8 @@ def url_content():
         raw_df = extract_data(spark, PROJECT_ID, GA4_DATASET_ID, GA4_TABLE_ID, TOTAL_URLS)
         temp_path = "/home/airflow/gcs/data/url_content_topics/tmp/raw.parquet"
         raw_df.write.mode("overwrite").parquet(temp_path)
-        spark.stop()
         print(f"[EXTRACT] Extracted {raw_df.count()} rows from BigQuery")
+        spark.stop()
         return temp_path
         # Pandas version (without spark)
         # raw_df = extract_data(PROJECT_ID, GA4_DATASET_ID, GA4_TABLE_ID, TOTAL_URLS)
