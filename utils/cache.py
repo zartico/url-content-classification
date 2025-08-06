@@ -126,7 +126,7 @@ def filter_cache_spark(spark, df: DataFrame) -> DataFrame:
 
     # Step 3: Identify cached rows using join
     df_joined = df.join(cached_df, on="url_hash", how="left_outer")
-    df_with_flag = df_joined.withColumn("is_cached", col("cached_df.url_hash").isNotNull())
+    df_with_flag = df_joined.withColumn("is_cached", col("url_hash").isNotNull())
     
     # Step 4: Extract cached hashes and update metadata (view_count + last_accessed)
     cached_hashes = (
