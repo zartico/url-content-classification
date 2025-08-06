@@ -40,6 +40,7 @@ def create_spark_session():
         .appName("BigQueryIntegration") \
         .config("spark.jars.packages", ",".join([
             "com.google.cloud.spark:spark-bigquery-with-dependencies_2.12:0.35.0",
+            "com.google.cloud.bigdataoss:gcs-connector:hadoop3-2.2.12",
             "javax.inject:javax.inject:1",
             "org.scala-lang:scala-library:2.12.18"
         ])) \
