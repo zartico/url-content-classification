@@ -40,14 +40,14 @@ def create_spark_session():
         .appName("BigQueryIntegration") \
         .config("spark.jars.packages", ",".join([
             "org.apache.commons:commons-lang3:3.12.0",
-            "com.google.cloud.spark:spark-bigquery-with-dependencies_2.12:0.36.1",
-            "com.google.cloud.bigdataoss:gcs-connector:hadoop3-2.2.11"
+            "com.google.cloud.spark:spark-bigquery-with-dependencies_2.12:0.34.0",
+            "com.google.cloud.bigdataoss:gcs-connector:hadoop3-2.2.5"
         ])) \
         .config("spark.sql.adaptive.enabled", "true") \
         .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
         .config("spark.hadoop.fs.gs.impl", "com.google.cloud.hadoop.fs.gcs.GoogleHadoopFileSystem") \
         .config("spark.hadoop.fs.AbstractFileSystem.gs.impl", "com.google.cloud.hadoop.fs.gcs.GoogleHadoopFS") \
-        .config("spark.jars.ivy", "/tmp/.ivy_jars_v3") \
+        .config("spark.jars.ivy", "/tmp/.ivy_jars_v4") \
         .config("spark.sql.execution.arrow.pyspark.enabled", "false") \
         .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer") \
         .config("spark.sql.adaptive.skewJoin.enabled", "false") \
