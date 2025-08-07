@@ -40,13 +40,14 @@ def create_spark_session():
         .appName("BigQueryIntegration") \
         .config("spark.jars.packages", ",".join([
             "com.google.cloud.spark:spark-bigquery-with-dependencies_2.12:0.35.0",
-            "com.google.cloud.bigdataoss:gcs-connector:hadoop3-2.1.7",
+            "com.google.cloud.bigdataoss:gcs-connector:hadoop3-2.0.1",
             "javax.inject:javax.inject:1",
             "org.scala-lang:scala-library:2.12.18"
         ])) \
         .config("spark.sql.adaptive.enabled", "true") \
         .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
         .config("spark.hadoop.fs.gs.impl", "com.google.cloud.hadoop.fs.gcs.GoogleHadoopFileSystem") \
+        .config("spark.hadoop.fs.AbstractFileSystem.gs.impl", "com.google.cloud.hadoop.fs.gcs.GoogleHadoopFS") \
         .getOrCreate()
 
 @dag(
