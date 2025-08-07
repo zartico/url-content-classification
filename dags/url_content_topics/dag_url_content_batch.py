@@ -34,15 +34,13 @@ TOTAL_URLS = 200
 MAX_DYNAMIC_TASKS = 500
 
 def create_spark_session():
-    """Create Spark session with BigQuery connector"""
     from pyspark.sql import SparkSession
+
     return SparkSession.builder \
         .appName("BigQueryIntegration") \
         .config("spark.jars.packages", ",".join([
             "com.google.cloud.spark:spark-bigquery-with-dependencies_2.12:0.35.0",
-            "com.google.cloud.bigdataoss:gcs-connector:hadoop3-2.0.1",
-            "javax.inject:javax.inject:1",
-            "org.scala-lang:scala-library:2.12.18"
+            "com.google.cloud.bigdataoss:gcs-connector:hadoop3-2.2.5"  # or 2.0.1
         ])) \
         .config("spark.sql.adaptive.enabled", "true") \
         .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
