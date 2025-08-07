@@ -39,8 +39,9 @@ def create_spark_session():
     return SparkSession.builder \
         .appName("BigQueryIntegration") \
         .config("spark.jars.packages", ",".join([
+            "org.apache.commons:commons-lang3:3.12.0",
             "com.google.cloud.spark:spark-bigquery-with-dependencies_2.12:0.35.0",
-            "com.google.cloud.bigdataoss:gcs-connector:hadoop3-2.2.5" + "#force-refresh" # or 2.0.1
+            "com.google.cloud.bigdataoss:gcs-connector:hadoop3-2.2.5" # or 2.0.1
         ])) \
         .config("spark.sql.adaptive.enabled", "true") \
         .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
