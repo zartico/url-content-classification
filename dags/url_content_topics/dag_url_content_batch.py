@@ -55,7 +55,7 @@ def create_spark_session():
     catchup=False,
     tags=["url-content"],
 )
-def url_content():
+def url_content_backfill():
     @task(task_id="extract_data", retries=0, retry_delay=timedelta(minutes=0))
     def extract():
         # Spark version for backfill
@@ -263,5 +263,5 @@ def url_content():
     categorized = categorize.expand(batch_with_texts=fetched)
     load.expand(batch_rows=categorized)
 
-url_content()
+url_content_backfill()
 
