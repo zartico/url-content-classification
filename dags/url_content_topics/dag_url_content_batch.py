@@ -42,7 +42,8 @@ def create_spark_session():
             "org.apache.commons:commons-lang3:3.12.0",
             "com.google.cloud.spark:spark-bigquery-with-dependencies_2.12:0.35.0",
             "com.google.cloud.bigdataoss:gcs-connector:hadoop3-2.2.5",
-             "com.google.guava:guava:32.1.2-jre" 
+             "com.google.guava:guava:32.1.2-jre",
+             "org.slf4j:slf4j-api:1.7.36"   
         ])) \
         .config("spark.sql.adaptive.enabled", "true") \
         .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
