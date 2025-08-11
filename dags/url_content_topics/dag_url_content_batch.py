@@ -12,6 +12,7 @@ from datetime import timedelta
 import pandas as pd
 import asyncio
 import uuid
+import math
 import sys
 import os
 
@@ -33,30 +34,39 @@ BATCH_SIZE = 50
 TOTAL_URLS = 200
 MAX_DYNAMIC_TASKS = 500
 
+# Use the GCS bucket configured in Airflow Variables
+TEMP_BUCKET = Variable.get("TEMP_GCS_BUCKET_NAME")  # e.g. non-codecs-prod-airflow/data/tmp/spark_staging
+
 def create_spark_session():
     from pyspark.sql import SparkSession
 
-    return SparkSession.builder \
-        .appName("BigQueryIntegration") \
-        .config("spark.jars.packages", ",".join([
-            "org.apache.commons:commons-lang3:3.12.0",
-            "com.google.cloud.spark:spark-bigquery-with-dependencies_2.12:0.32.2",
-            "com.google.cloud.bigdataoss:gcs-connector:hadoop3-2.2.0"
-        ])) \
-        .config("spark.sql.adaptive.enabled", "true") \
-        .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
-        .config("spark.hadoop.fs.gs.impl", "com.google.cloud.hadoop.fs.gcs.GoogleHadoopFileSystem") \
-        .config("spark.hadoop.fs.AbstractFileSystem.gs.impl", "com.google.cloud.hadoop.fs.gcs.GoogleHadoopFS") \
-        .config("spark.jars.ivy", "/tmp/.ivy_jars_v5") \
-        .config("spark.sql.execution.arrow.pyspark.enabled", "false") \
-        .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer") \
-        .config("spark.sql.adaptive.skewJoin.enabled", "false") \
-        .config("spark.driver.memory", "2g") \
-        .config("spark.driver.maxResultSize", "1g") \
-        .config("spark.datasource.bigquery.readDataFormat", "AVRO") \
-        .config("spark.datasource.bigquery.useAvroLogicalTypes", "true") \
-        .config("spark.sql.execution.arrow.maxRecordsPerBatch", "1000") \
+    spark = (
+        SparkSession.builder
+        .appName("BigQueryIntegration")
+        # Pin Spark to local mode and 2 cores so the Airflow worker keeps breathing
+        .master("local[2]")
+        # Use only the JARs you vendored into the image / GCS-mounted path
+        .config("spark.jars", ",".join([
+            "/home/airflow/gcs/data/url_content_topics/src/spark_jars/gcs-connector-hadoop3-2.2.21.jar",
+            "/home/airflow/gcs/data/url_content_topics/src/spark_jars/spark-3.5-bigquery-0.37.0.jar",
+        ]))
+        # GCS filesystem hooks
+        .config("spark.hadoop.fs.gs.impl", "com.google.cloud.hadoop.fs.gcs.GoogleHadoopFileSystem")
+        .config("spark.hadoop.fs.AbstractFileSystem.gs.impl", "com.google.cloud.hadoop.fs.gcs.GoogleHadoopFS")
+        # Point BigQuery connector at your temp bucket (writer can still override per-write)
+        .config("spark.bigquery.temp.gcs.bucket", TEMP_BUCKET)
+        # Conservative memory; your worker is 8GB total
+        .config("spark.driver.memory", "4g")
+        .config("spark.driver.maxResultSize", "2g")
+        # Sensible defaults
+        .config("spark.sql.adaptive.enabled", "true")
+        .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
+        .config("spark.sql.parquet.mergeSchema", "true")
+        .config("spark.sql.parquet.enableVectorizedReader", "false")
+        .config("spark.sql.shuffle.partitions", "8")   # 4 * cores (2)
         .getOrCreate()
+    )
+    return spark
 
 @dag(
     schedule_interval=None,
@@ -153,7 +163,7 @@ def url_content_backfill():
         final_df.write \
             .format("bigquery") \
             .option("table", f"{PROJECT_ID}.{BQ_DATASET_ID}.staging_url_batches") \
-            .option("temporaryGcsBucket", Variable.get("TEMP_GCS_BUCKET")) \
+            .option("temporaryGcsBucket", TEMP_BUCKET) \
             .mode("append") \
             .save()
 
