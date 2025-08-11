@@ -3,7 +3,7 @@ from utils.cache import hash_url, get_result_columns
 from utils.category_mapping import map_to_zartico_category
 from utils.utils import is_homepage, check_and_increment_quota
 from google.cloud import language_v1, bigquery
-from google.api_core.retry import Retry
+from google.api_core.retry import Retry, if_exception_type
 from google.api_core import exceptions
 from bs4 import BeautifulSoup
 from datetime import datetime, timezone
@@ -11,12 +11,15 @@ import pandas as pd
 import random, time
 
 RETRY = Retry(
-    predicate=Retry.if_exception_type(
+    predicate=if_exception_type(
         exceptions.ResourceExhausted,    # 429 / quota
         exceptions.ServiceUnavailable,   # 503
         exceptions.DeadlineExceeded,     # server-side timeout
     ),
-    initial=1.0, maximum=10.0, multiplier=1.5, deadline=60.0,
+    initial=1.0, 
+    maximum=10.0, 
+    multiplier=1.5, 
+    deadline=60.0,
 )
 
 def classify_text(raw_html, client):
