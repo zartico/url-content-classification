@@ -53,6 +53,9 @@ def create_spark_session():
         .config("spark.sql.adaptive.skewJoin.enabled", "false") \
         .config("spark.driver.memory", "2g") \
         .config("spark.driver.maxResultSize", "1g") \
+        .config("spark.datasource.bigquery.readDataFormat", "AVRO") \
+        .config("spark.datasource.bigquery.useAvroLogicalTypes", "true") \
+        .config("spark.sql.execution.arrow.maxRecordsPerBatch", "1000") \
         .getOrCreate()
 
 @dag(
