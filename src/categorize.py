@@ -3,11 +3,21 @@ from utils.cache import hash_url, get_result_columns
 from utils.category_mapping import map_to_zartico_category
 from utils.utils import is_homepage, check_and_increment_quota
 from google.cloud import language_v1, bigquery
+from google.api_core.retry import Retry
+from google.api_core import exceptions
 from bs4 import BeautifulSoup
 from datetime import datetime, timezone
 import pandas as pd
-import time
+import random, time
 
+RETRY = Retry(
+    predicate=Retry.if_exception_type(
+        exceptions.ResourceExhausted,    # 429 / quota
+        exceptions.ServiceUnavailable,   # 503
+        exceptions.DeadlineExceeded,     # server-side timeout
+    ),
+    initial=1.0, maximum=10.0, multiplier=1.5, deadline=60.0,
+)
 
 def classify_text(raw_html, client):
     """ Classify text using Google Cloud Natural Language API."""
@@ -16,6 +26,9 @@ def classify_text(raw_html, client):
         # Extract and sanitize visible text
         soup = BeautifulSoup(raw_html, "html.parser")
         text = soup.get_text(separator=' ', strip=True)
+
+        # tiny jitter to avoid lockstep bursts across mapped tasks
+        time.sleep(random.uniform(0, 0.2))
 
         # Call Google NLP V2 API
         document = language_v1.Document(
@@ -26,7 +39,9 @@ def classify_text(raw_html, client):
             request={
                 "document": document,
                 "classification_model_options": {"v2_model": {}}
-            }
+            }, 
+            retry = RETRY,
+            timeout=30,
         )
         return response.categories
     except Exception as e:
@@ -111,8 +126,6 @@ def categorize_urls(df):
             review_flags.append(True)
             raw_categories.append(None)
             view_counts.append(1)
-
-        time.sleep(0.5)  # Rate limit
 
     # If no new rows remain, return empty DataFrame with correct columns
     if not processed_indexes or len(df) == 0:
