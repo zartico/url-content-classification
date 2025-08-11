@@ -77,7 +77,7 @@ async def fetch_playwright(url: str) -> tuple[str, str | None]:
     return url, None
 
 
-async def fetch_all_pages(urls: list[str], max_concurrent: int = 2) -> dict[str, str]:
+async def fetch_all_pages(urls: list[str], max_concurrent: int) -> dict[str, str]:
     results = {}
 
     semaphore = asyncio.Semaphore(max_concurrent)

@@ -30,8 +30,8 @@ from utils.web_fetch import fetch_all_pages, extract_visible_text
 from src.categorize import categorize_urls
 from src.load import load_data
 
-BATCH_SIZE = 50
-TOTAL_URLS = 200
+BATCH_SIZE = 100
+TOTAL_URLS = 2000
 MAX_DYNAMIC_TASKS = 500
 
 # Use the GCS bucket configured in Airflow Variables
@@ -75,7 +75,7 @@ def create_spark_session():
     tags=["url-content"],
 )
 def url_content_backfill():
-    @task(task_id="extract_data", retries=0, retry_delay=timedelta(minutes=0))
+    @task(task_id="extract_data", retries=0, retry_delay=timedelta(minutes=0), pool = "spark")
     def extract():
         # Spark version for backfill
         print("[EXTRACT] Starting data extraction from BigQuery")
@@ -91,7 +91,7 @@ def url_content_backfill():
         # print(f"[EXTRACT] Extracted {len(raw_df)} rows from BigQuery")
         # return raw_df.to_dict(orient="records")
 
-    @task(task_id="transform_data", retries=0, retry_delay=timedelta(minutes=0))
+    @task(task_id="transform_data", retries=0, retry_delay=timedelta(minutes=0), pool = "spark")
     def transform(raw_path):
         # Spark version for backfill
         print("[TRANSFORM] Starting data transformation")
@@ -110,7 +110,7 @@ def url_content_backfill():
         # print(f"[TRANSFORM] Transformed/Cleaned {len(transformed_df)} rows")
         # return transformed_df.to_dict(orient="records")
 
-    @task(task_id="filter_urls", retries=0, retry_delay=timedelta(minutes=0))
+    @task(task_id="filter_urls", retries=0, retry_delay=timedelta(minutes=0), pool = "spark")
     def filter_cached_urls(transformed_path):
         # Spark version for backfill
         print("[FILTER] Start filtering cached URLs")
@@ -130,7 +130,7 @@ def url_content_backfill():
         # print(f"[FILTER] Filtered cached URLs, remaining {len(uncached_df)} uncached rows")
         # return uncached_df.to_dict(orient="records")
     
-    @task(task_id="stage_batches_bq", retries=0, retry_delay=timedelta(minutes=0))
+    @task(task_id="stage_batches_bq", retries=0, retry_delay=timedelta(minutes=0), pool = "spark")
     def stage_batches_to_bq(records, batch_size: int = BATCH_SIZE) -> list[str]:
         """Chunks records and inserts them into BQ with unique batch_id"""
         # Spark version for backfill
@@ -187,7 +187,7 @@ def url_content_backfill():
         # print(f"[STAGE] Created {len(batch_ids)} batches of size ~{batch_size}")
         # return batch_ids
 
-    @task(task_id="fetch_urls", retries=3, retry_delay=timedelta(minutes=3))
+    @task(task_id="fetch_urls", retries=3, retry_delay=timedelta(minutes=3), max_active_tis_per_dag=5)
     def fetch_urls(batch_id: str):
         print("[FETCH] Fetching URLs in batch")
         client = bigquery.Client()
@@ -197,7 +197,7 @@ def url_content_backfill():
         """).to_dataframe()
 
         urls = df["page_url"].tolist()
-        page_texts = asyncio.run(fetch_all_pages(urls, max_concurrent=2))
+        page_texts = asyncio.run(fetch_all_pages(urls, max_concurrent=8))
 
         df["page_text"] = df["page_url"].apply(
             lambda url: extract_visible_text(page_texts.get(url, ""))
@@ -230,7 +230,7 @@ def url_content_backfill():
 
         # return batch_chunk
 
-    @task(task_id="categorize_urls", retries=3, retry_delay=timedelta(minutes=3), max_active_tis_per_dag=5)
+    @task(task_id="categorize_urls", retries=3, retry_delay=timedelta(minutes=3), max_active_tis_per_dag=5, pool = "nlp")
     def categorize(batch_with_texts):
         print("[CATEGORIZE] Starting URL categorization")
         #df_page_text = pd.DataFrame(batch_with_texts)
