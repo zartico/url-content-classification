@@ -35,7 +35,7 @@ TOTAL_URLS = 200
 MAX_DYNAMIC_TASKS = 500
 
 # Use the GCS bucket configured in Airflow Variables
-TEMP_BUCKET = Variable.get("TEMP_GCS_BUCKET_NAME")  # e.g. non-codecs-prod-airflow/data/tmp/spark_staging
+TEMP_BUCKET = Variable.get("TEMP_GCS_BUCKET")  # e.g. non-codecs-prod-airflow/data/tmp/spark_staging
 
 def create_spark_session():
     from pyspark.sql import SparkSession
