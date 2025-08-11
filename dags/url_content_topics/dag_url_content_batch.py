@@ -30,8 +30,8 @@ from utils.web_fetch import fetch_all_pages, extract_visible_text
 from src.categorize import categorize_urls
 from src.load import load_data
 
-BATCH_SIZE = 100
-TOTAL_URLS = 2000
+BATCH_SIZE = 50
+TOTAL_URLS = 200
 MAX_DYNAMIC_TASKS = 500
 
 # Use the GCS bucket configured in Airflow Variables

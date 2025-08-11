@@ -97,7 +97,7 @@ def filter_cache(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=get_result_columns())
     
     # Remove temporary columns that shouldn't be in the final output
-    uncached_df = uncached_df.drop(columns=["url_hash", "is_cached"], errors="ignore")
+    uncached_df = uncached_df.drop(columns=["is_cached"], errors="ignore")
 
     print(f"[FILTER] {len(cached_hashes)} URLs were cached. {len(uncached_df)} URLs remain to process.")
     return uncached_df
@@ -145,7 +145,7 @@ def filter_cache_spark(spark, df: DataFrame) -> DataFrame:
         update_bq_cache_bulk(client, cached_hashes, PROJECT_ID, BQ_DATASET_ID, BQ_TABLE_ID)
 
     # Step 5: Filter out cached rows
-    uncached_df = df_with_flag.filter(~col("is_cached")).drop("url_hash", "is_cached")
+    uncached_df = df_with_flag.filter(~col("is_cached")).drop("is_cached")
 
     remaining = uncached_df.count()
     print(f"[FILTER] {len(cached_hashes)} URLs were cached. {remaining} URLs remain to process.")

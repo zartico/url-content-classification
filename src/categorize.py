@@ -80,7 +80,12 @@ def categorize_urls(df):
         site = row["site"]
         page_text = row.get("page_text", "")
 
-        url_hash = hash_url(trimmed_url)
+        # Use existing url_hash if available, otherwise create it (for backward compatibility)
+        if "url_hash" in df.columns and pd.notna(row.get("url_hash")):
+            url_hash = row["url_hash"]
+        else:
+            url_hash = hash_url(trimmed_url)
+        
         now_ts = datetime.now(timezone.utc).isoformat()
 
         # If no text or not long enough for NLP API, skip this URL
