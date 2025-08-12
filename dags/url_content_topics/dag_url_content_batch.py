@@ -1,5 +1,6 @@
 from airflow.decorators import dag, task
 from airflow.utils.dates import days_ago
+from airflow.utils.trigger_rule import TriggerRule
 from airflow.models import Variable
 
 
@@ -334,16 +335,20 @@ def url_content_backfill():
 
         # return batch_chunk
 
-    @task(task_id="categorize_urls", retries=3, retry_delay=timedelta(minutes=3), max_active_tis_per_dag=5, pool = "nlp")
-    def categorize(batch_with_texts):
+    @task(task_id="categorize_urls", retries=3, retry_delay=timedelta(minutes=3), max_active_tis_per_dag=5, pool = "nlp", trigger_rule=TriggerRule.ALL_DONE)
+    def categorize(batch_id: str):
         print("[CATEGORIZE] Starting URL categorization")
         #df_page_text = pd.DataFrame(batch_with_texts)
         client = bigquery.Client()
         table_id = f"{PROJECT_ID}.{BQ_DATASET_ID}.staging_url_batches"
         df = client.query(f"""
             SELECT * FROM `{table_id}`
-            WHERE batch_id = '{batch_with_texts}' AND page_text IS NOT NULL
+            WHERE batch_id = '{batch_id}' AND page_text IS NOT NULL
         """).to_dataframe()
+
+        if df.empty:
+            print(f"[CATEGORIZE] No page_text for batch_id={batch_id}; skipping.")
+            return []
 
         categorized_df = categorize_urls(df)
         print(f"[CATEGORIZE] Categorized {len(categorized_df)} URLs")
@@ -384,7 +389,9 @@ def url_content_backfill():
     batch_ids = stage_batches_to_bq(uncached_parquet_path=new_records, batch_size=BATCH_SIZE, run_id=run_id)
 
     fetched = fetch_urls.expand(batch_id=batch_ids)
-    categorized = categorize.expand(batch_with_texts=fetched)
+    categorized = categorize.expand(batch_ids=batch_ids)
+    # Categorize waits for corresponding fetch to complete
+    fetched >> categorized
     load.expand(batch_rows=categorized)
 
 url_content_backfill()
