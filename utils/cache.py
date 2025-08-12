@@ -1,5 +1,5 @@
 from pyspark.sql import DataFrame
-from pyspark.sql.functions import col, sha2
+from pyspark.sql.functions import col, sha2, F
 from pyspark.sql.types import StringType
 
 from config.project_config import PROJECT_ID, BQ_DATASET_ID, BQ_TABLE_ID
@@ -7,6 +7,7 @@ from google.cloud import bigquery
 from hashlib import sha256
 from datetime import datetime, timezone
 import pandas as pd
+import uuid
 
 def hash_url(url):
     return sha256(url.encode("utf-8")).hexdigest()
@@ -102,51 +103,176 @@ def filter_cache(df: pd.DataFrame) -> pd.DataFrame:
     print(f"[FILTER] {len(cached_hashes)} URLs were cached. {len(uncached_df)} URLs remain to process.")
     return uncached_df
 
-def filter_cache_spark(spark, df: DataFrame) -> DataFrame:
+# -----------------------
+# BigQuery MERGE helpers
+# -----------------------
+
+def _touches_table_name(run_id: str | None = None) -> str:
     """
-    Spark version of filter_cache().
-    Filters out cached URLs by joining with the BigQuery cache table on url_hash.
-    Updates view_count and last_accessed for cached entries.
-    Returns a Spark DataFrame with only uncached URLs.
+    Fully-qualified temp table name for cache touches. We drop it after MERGE.
     """
-    if "trimmed_page_url" not in df.columns:
-        print("[FILTER] Input DataFrame missing 'trimmed_page_url'")
-        return spark.createDataFrame([], schema=get_result_columns())
+    suffix = (run_id or uuid.uuid4().hex).replace("-", "_")
+    return f"{PROJECT_ID}.{BQ_DATASET_ID}.tmp_cached_touches_{suffix}"
 
-    # Step 1: Generate url_hash using Spark sha256
-    df = df.withColumn("url_hash", sha2(col("trimmed_page_url").cast(StringType()), 256))
-    df = df.alias("main")
+def _merge_touches_with_counts(client: bigquery.Client, touches_table: str):
+    """
+    touches_table schema: (url_hash STRING, dup_hits INT64)
+    Increments view_count by dup_hits for existing rows and sets last_accessed.
+    Drops the temp table when done to keep the dataset clean.
+    """
+    merge_sql = f"""
+    MERGE `{PROJECT_ID}.{BQ_DATASET_ID}.{BQ_TABLE_ID}` T
+    USING `{touches_table}` S
+    ON T.url_hash = S.url_hash
+    WHEN MATCHED THEN
+      UPDATE SET
+        T.last_accessed = CURRENT_TIMESTAMP(),
+        T.view_count = IFNULL(T.view_count, 0) + S.dup_hits
+    """
+    client.query(merge_sql).result()
 
-    # Step 2: Load cache table from BigQuery
-    cached_df = spark.read \
-        .format("bigquery") \
-        .option("table", f"{PROJECT_ID}.{BQ_DATASET_ID}.{BQ_TABLE_ID}") \
-        .load() \
-        .select("url_hash") \
-        .alias("cached")
+    # Drop temp table to avoid clutter
+    client.query(f"DROP TABLE `{touches_table}`").result()
+    print(f"[FILTER] Touch MERGE complete and dropped {touches_table}")
 
-    # Step 3: Left join and identify cached rows
-    df_joined = df.join(cached_df, on="url_hash", how="left_outer")
-    df_with_flag = df_joined.withColumn("is_cached", col("cached.url_hash").isNotNull())
+# -----------------------
+# Spark (scalable) path
+# -----------------------
 
-    # Step 4: Extract and update cached URL hashes
-    cached_hashes = (
-        df_with_flag.filter(col("is_cached"))
+def filter_cache_spark(
+    spark,
+    df: DataFrame,
+    *,
+    run_id: str | None = None,
+    include_staging_check: bool = True,
+    staging_table: str = f"{PROJECT_ID}.{BQ_DATASET_ID}.staging_url_batches",
+    temp_gcs_bucket: str | None = None
+) -> DataFrame:
+    """
+    Preserves access frequency and prevents NLP duplicates:
+
+    1) Require url_hash (computed in transform).
+    2) dup_hits = count(*) per url_hash in this slice.
+    3) For hashes already in cache: write (url_hash, dup_hits) to a temp BQ table and MERGE to bump
+       view_count += dup_hits and set last_accessed = now. (No driver collect, race-safe.)
+    4) For uncached hashes: return ONE canonical row per url_hash for NLP, carrying 'access_hits = dup_hits'.
+    5) Optionally anti-join against this run's staging so retries don't re-enqueue.
+
+    Returns: Spark DF with columns from the input (+ access_hits), one row per uncached url_hash.
+    """
+    # 1) url_hash must exist (we compute it in transform)
+    if "url_hash" not in df.columns:
+        raise ValueError("[FILTER] Expected 'url_hash' to exist. Compute it in transform first.")
+
+    # 2) Count duplicates in this slice
+    dup_counts = df.groupBy("url_hash").agg(F.count(F.lit(1)).alias("dup_hits"))
+
+    # 3) Load cache keys
+    cached_keys = (
+        spark.read.format("bigquery")
+        .option("table", f"{PROJECT_ID}.{BQ_DATASET_ID}.{BQ_TABLE_ID}")
+        .load()
         .select("url_hash")
         .distinct()
-        .rdd.flatMap(lambda row: row)
-        .collect()
-        # .toPandas()["url_hash"]
-        # .tolist()
     )
 
-    if cached_hashes:
+    # Split cached vs. uncached (still at slice granularity)
+    df_with_counts = df.join(dup_counts, on="url_hash", how="left")
+    df_cached   = df_with_counts.join(cached_keys, on="url_hash", how="left_semi")
+    df_uncached = df_with_counts.join(cached_keys, on="url_hash", how="left_anti")
+
+    # Touch MERGE for cached (no collect): write -> MERGE -> drop
+    cached_touches = df_cached.select("url_hash", "dup_hits").distinct()
+    cached_count = cached_touches.count()
+    if cached_count > 0:
+        touches_table = _touches_table_name(run_id)
+        (cached_touches.write
+            .format("bigquery")
+            .option("table", touches_table)
+            .option("temporaryGcsBucket", temp_gcs_bucket or "")
+            .mode("overwrite")
+            .save())
         client = bigquery.Client(project=PROJECT_ID)
-        update_bq_cache_bulk(client, cached_hashes, PROJECT_ID, BQ_DATASET_ID, BQ_TABLE_ID)
+        _merge_touches_with_counts(client, touches_table)
 
-    # Step 5: Filter out cached rows
-    uncached_df = df_with_flag.filter(~col("is_cached")).drop("is_cached")
+    # For uncached: pick a deterministic representative row and carry access_hits forward
+    rep = (
+        df_uncached
+        .withColumn("url_len", F.length(col("page_url")))
+        .withColumn("access_hits", col("dup_hits"))
+        .withColumn(
+            "rn",
+            F.row_number().over(
+                F.Window.partitionBy("url_hash").orderBy(col("url_len").asc(), col("page_url").asc())
+            )
+        )
+        .filter(col("rn") == 1)
+        .drop("rn", "url_len")
+    )
 
-    remaining = uncached_df.count()
-    print(f"[FILTER] {len(cached_hashes)} URLs were cached. {remaining} URLs remain to process.")
-    return uncached_df
+    # Optional: exclude anything already staged for this run to avoid re-enqueue on retries
+    # if include_staging_check and run_id is not None:
+    #     staged_keys = (
+    #         spark.read.format("bigquery")
+    #         .option("table", staging_table)
+    #         .load()
+    #         .filter(col("run_id") == lit(run_id))
+    #         .select("url_hash")
+    #         .distinct()
+    #     )
+    #     rep = rep.join(staged_keys, on="url_hash", how="left_anti")
+
+    remaining = rep.count()
+    print(f"[FILTER] Cached touched: {cached_count} url_hashes. Uncached to process: {remaining}")
+    return rep
+
+
+
+# def filter_cache_spark(spark, df: DataFrame) -> DataFrame:
+#     """
+#     Spark version of filter_cache().
+#     Filters out cached URLs by joining with the BigQuery cache table on url_hash.
+#     Updates view_count and last_accessed for cached entries.
+#     Returns a Spark DataFrame with only uncached URLs.
+#     """
+#     if "trimmed_page_url" not in df.columns:
+#         print("[FILTER] Input DataFrame missing 'trimmed_page_url'")
+#         return spark.createDataFrame([], schema=get_result_columns())
+
+#     # Step 1: Generate url_hash using Spark sha256
+#     df = df.withColumn("url_hash", sha2(col("trimmed_page_url").cast(StringType()), 256))
+#     df = df.alias("main")
+
+#     # Step 2: Load cache table from BigQuery
+#     cached_df = spark.read \
+#         .format("bigquery") \
+#         .option("table", f"{PROJECT_ID}.{BQ_DATASET_ID}.{BQ_TABLE_ID}") \
+#         .load() \
+#         .select("url_hash") \
+#         .alias("cached")
+
+#     # Step 3: Left join and identify cached rows
+#     df_joined = df.join(cached_df, on="url_hash", how="left_outer")
+#     df_with_flag = df_joined.withColumn("is_cached", col("cached.url_hash").isNotNull())
+
+#     # Step 4: Extract and update cached URL hashes
+#     cached_hashes = (
+#         df_with_flag.filter(col("is_cached"))
+#         .select("url_hash")
+#         .distinct()
+#         .rdd.flatMap(lambda row: row)
+#         .collect()
+#         # .toPandas()["url_hash"]
+#         # .tolist()
+#     )
+
+#     if cached_hashes:
+#         client = bigquery.Client(project=PROJECT_ID)
+#         update_bq_cache_bulk(client, cached_hashes, PROJECT_ID, BQ_DATASET_ID, BQ_TABLE_ID)
+
+#     # Step 5: Filter out cached rows
+#     uncached_df = df_with_flag.filter(~col("is_cached")).drop("is_cached")
+
+#     remaining = uncached_df.count()
+#     print(f"[FILTER] {len(cached_hashes)} URLs were cached. {remaining} URLs remain to process.")
+#     return uncached_df

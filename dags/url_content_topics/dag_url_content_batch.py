@@ -6,9 +6,12 @@ from airflow.models import Variable
 from pyspark.sql.functions import monotonically_increasing_id, floor, col, lit
 from pyspark.sql.types import StringType
 from pyspark.sql.functions import udf
+from pyspark.sql import functions as F
+from pyspark.sql import types as T
+from pyspark.sql.window import Window
 
 from google.cloud import bigquery
-from datetime import timedelta
+from datetime import timedelta, datetime, timezone
 import pandas as pd
 import asyncio
 import uuid
@@ -30,8 +33,8 @@ from utils.web_fetch import fetch_all_pages, extract_visible_text
 from src.categorize import categorize_urls
 from src.load import load_data
 
-BATCH_SIZE = 50
-TOTAL_URLS = 200
+BATCH_SIZE = 100
+TOTAL_URLS = 2000
 MAX_DYNAMIC_TASKS = 500
 
 # Use the GCS bucket configured in Airflow Variables
@@ -75,6 +78,12 @@ def create_spark_session():
     tags=["url-content"],
 )
 def url_content_backfill():
+    @task(task_id="make_run_id", retries=0, retry_delay=timedelta(minutes=0))
+    def make_run_id() -> str:
+        # Stable id for this DAG run (readable + unique)
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        return f"{ts}_{uuid.uuid4().hex[:8]}"
+
     @task(task_id="extract_data", retries=0, retry_delay=timedelta(minutes=0), pool = "spark")
     def extract():
         # Spark version for backfill
@@ -111,13 +120,20 @@ def url_content_backfill():
         # return transformed_df.to_dict(orient="records")
 
     @task(task_id="filter_urls", retries=0, retry_delay=timedelta(minutes=0), pool = "spark")
-    def filter_cached_urls(transformed_path):
+    def filter_cached_urls(transformed_path, run_id: str):
         # Spark version for backfill
         print("[FILTER] Start filtering cached URLs")
         spark = create_spark_session()
         df = spark.read.parquet(transformed_path)
         print(f"[FILTER] Loaded from transformed data with {df.count()} rows")
-        uncached_df = filter_cache_spark(spark, df)
+        #uncached_df = filter_cache_spark(spark, df)
+        uncached_df = filter_cache_spark(
+            spark, df,
+            run_id=run_id,
+            include_staging_check=True,
+            taging_table=f"{PROJECT_ID}.{BQ_DATASET_ID}.staging_url_batches",
+            temp_gcs_bucket=TEMP_BUCKET
+        )
         print(f"[FILTER] Filtered cached URLs, remaining {uncached_df.count()} uncached rows")
         temp_path = "/home/airflow/gcs/data/url_content_topics/tmp/uncached.parquet"
         uncached_df.write.mode("overwrite").parquet(temp_path)
@@ -130,45 +146,132 @@ def url_content_backfill():
         # print(f"[FILTER] Filtered cached URLs, remaining {len(uncached_df)} uncached rows")
         # return uncached_df.to_dict(orient="records")
     
-    @task(task_id="stage_batches_bq", retries=0, retry_delay=timedelta(minutes=0), pool = "spark")
-    def stage_batches_to_bq(records, batch_size: int = BATCH_SIZE) -> list[str]:
-        """Chunks records and inserts them into BQ with unique batch_id"""
-        # Spark version for backfill
+    @task(task_id="stage_batches_bq", retries=0, pool="spark")
+    def stage_batches_to_bq(uncached_parquet_path: str, run_id: str, batch_size: int) -> list[str]:
+        """
+        1) Read uncached parquet (must include: url_hash, trimmed_page_url, site, page_url, client_id, access_hits).
+        2) Assign deterministic batches of ~batch_size using row_number() over url_hash ordering.
+        3) Write to a per-run temp BQ table.
+        4) MERGE insert-if-missing into staging_url_batches keyed by (run_id, url_hash).
+        5) Return the list of batch_ids that were staged.
+        """
         spark = create_spark_session()
-        print(f"[STAGE] Reading uncached parquet from {records}")
-        df = spark.read.parquet(records)
 
-        count = df.count()
-        if count == 0:
-            print("[STAGE] No rows to stage.")
-            return []
+        print(f"[STAGE] Reading uncached parquet from {uncached_parquet_path}")
+        df = spark.read.parquet(uncached_parquet_path)
 
-        # Assign row index and compute batch group
-        df_with_id = df.withColumn("row_num", monotonically_increasing_id())
-        df_with_batch = df_with_id.withColumn("batch_index", floor(col("row_num") / batch_size))
+        required_cols = {"url_hash", "trimmed_page_url", "site", "page_url", "client_id", "access_hits"}
+        missing = required_cols - set(df.columns)
+        if missing:
+            raise ValueError(f"[STAGE] Missing required columns in uncached dataset: {missing}")
 
-        # Get distinct batch indices to generate unique UUIDs
-        batch_indices = df_with_batch.select("batch_index").distinct().rdd.flatMap(lambda x: x).collect()
-        batch_uuid_map = {idx: str(uuid.uuid4()) for idx in batch_indices}
+        # Deterministic row numbers → batch_index
+        w = Window.orderBy(F.col("url_hash").asc())
+        df_idx = (df
+                .withColumn("row_num", F.row_number().over(w))
+                .withColumn("batch_index", F.floor((F.col("row_num") - F.lit(1)) / F.lit(batch_size)))
+                )
 
-        def assign_batch_id(index):
-            return batch_uuid_map.get(index, str(uuid.uuid4()))
+        # Build (batch_index -> batch_id) mapping on driver; small cardinality so collect is fine
+        batch_indices = [r.batch_index for r in df_idx.select("batch_index").distinct().collect()]
+        batch_map_rows = [(int(i), f"batch_{i}_{run_id}") for i in sorted(batch_indices)]
+        batch_map_df = spark.createDataFrame(batch_map_rows, schema=T.StructType([
+            T.StructField("batch_index", T.IntegerType(), False),
+            T.StructField("batch_id",    T.StringType(),  False),
+        ]))
 
-        assign_batch_id_udf = udf(assign_batch_id, StringType())
-        final_df = df_with_batch.withColumn("batch_id", assign_batch_id_udf(col("batch_index"))).drop("row_num", "batch_index")
+        # Join mapping -> add run_id
+        staged_df = (df_idx.join(batch_map_df, on="batch_index", how="left")
+                        .drop("row_num", "batch_index")
+                        .withColumn("run_id", F.lit(run_id))
+                    )
 
-        print(f"[STAGE] Prepared {final_df.count()} rows with {len(batch_uuid_map)} unique batch_ids")
+        # Write to per-run temp table in BigQuery
+        tmp_table = f"{PROJECT_ID}.{BQ_DATASET_ID}.tmp_stage_candidates_{run_id.replace('-', '_')}"
+        (staged_df
+            .select("url_hash", "trimmed_page_url", "site", "page_url", "client_id", "access_hits", "run_id", "batch_id")
+            .write
+            .format("bigquery")
+            .option("table", tmp_table)
+            .option("temporaryGcsBucket", TEMP_BUCKET)
+            .mode("overwrite")
+            .save())
+        print(f"[STAGE] Wrote candidates to {tmp_table}")
 
-        # Write to BigQuery
-        final_df.write \
-            .format("bigquery") \
-            .option("table", f"{PROJECT_ID}.{BQ_DATASET_ID}.staging_url_batches") \
-            .option("temporaryGcsBucket", TEMP_BUCKET) \
-            .mode("append") \
-            .save()
+        # MERGE insert-if-missing into staging_url_batches (race-safe)
+        client = bigquery.Client(project=PROJECT_ID)
+        staging_table = f"{PROJECT_ID}.{BQ_DATASET_ID}.staging_url_batches"
+
+        merge_sql = f"""
+        MERGE `{staging_table}` T
+        USING `{tmp_table}` S
+        ON T.run_id = S.run_id AND T.url_hash = S.url_hash
+        WHEN NOT MATCHED THEN
+        INSERT (url_hash, trimmed_page_url, site, page_url, client_id, access_hits, run_id, batch_id)
+        VALUES (S.url_hash, S.trimmed_page_url, S.site, S.page_url, S.client_id, S.access_hits, S.run_id, S.batch_id)
+        """
+        client.query(merge_sql).result()
+        print(f"[STAGE] MERGE complete into {staging_table}")
+
+        # Get the finalized batch_ids for this run (distinct)
+        q = client.query(f"""
+        SELECT DISTINCT batch_id
+        FROM `{staging_table}`
+        WHERE run_id = @run_id
+        """, job_config=bigquery.QueryJobConfig(
+            query_parameters=[bigquery.ScalarQueryParameter("run_id", "STRING", run_id)]
+        ))
+        batch_ids = [r["batch_id"] for r in q.result()]
+        print(f"[STAGE] Created {len(batch_ids)} batches for run_id={run_id}")
+
+        # Optional: drop temp table to keep dataset clean
+        client.query(f"DROP TABLE `{tmp_table}`").result()
+        print(f"[STAGE] Dropped temp table {tmp_table}")
 
         spark.stop()
-        return list(batch_uuid_map.values())
+        return batch_ids
+
+
+
+    # @task(task_id="stage_batches_bq", retries=0, retry_delay=timedelta(minutes=0), pool = "spark")
+    # def stage_batches_to_bq(records, run_id: str,  batch_size: int = BATCH_SIZE) -> list[str]:
+    #     """Chunks records and inserts them into BQ with unique batch_id"""
+    #     # Spark version for backfill
+    #     spark = create_spark_session()
+    #     print(f"[STAGE] Reading uncached parquet from {records}")
+    #     df = spark.read.parquet(records)
+
+    #     count = df.count()
+    #     if count == 0:
+    #         print("[STAGE] No rows to stage.")
+    #         return []
+
+    #     # Assign row index and compute batch group
+    #     df_with_id = df.withColumn("row_num", monotonically_increasing_id())
+    #     df_with_batch = df_with_id.withColumn("batch_index", floor(col("row_num") / batch_size))
+
+    #     # Get distinct batch indices to generate unique UUIDs
+    #     batch_indices = df_with_batch.select("batch_index").distinct().rdd.flatMap(lambda x: x).collect()
+    #     batch_uuid_map = {idx: str(uuid.uuid4()) for idx in batch_indices}
+
+    #     def assign_batch_id(index):
+    #         return batch_uuid_map.get(index, str(uuid.uuid4()))
+
+    #     assign_batch_id_udf = udf(assign_batch_id, StringType())
+    #     final_df = df_with_batch.withColumn("batch_id", assign_batch_id_udf(col("batch_index"))).drop("row_num", "batch_index")
+
+    #     print(f"[STAGE] Prepared {final_df.count()} rows with {len(batch_uuid_map)} unique batch_ids")
+
+    #     # Write to BigQuery
+    #     final_df.write \
+    #         .format("bigquery") \
+    #         .option("table", f"{PROJECT_ID}.{BQ_DATASET_ID}.staging_url_batches") \
+    #         .option("temporaryGcsBucket", TEMP_BUCKET) \
+    #         .mode("append") \
+    #         .save()
+
+    #     spark.stop()
+    #     return list(batch_uuid_map.values())
     
         # Pandas version (without spark)
         # bq_client = bigquery.Client()
@@ -215,6 +318,7 @@ def url_content_backfill():
 
         client.load_table_from_dataframe(df, staging_table).result()
         return batch_id 
+    
         # return df.to_dict(orient="records")
         # print("[FETCH] Fetching URLs in batch")
         # urls = [x["page_url"] for x in batch_chunk]
@@ -273,10 +377,11 @@ def url_content_backfill():
         print("[LOAD] Data loaded successfully")
         return "Loaded"
 
+    run_id = make_run_id()
     raw_path = extract()
     transformed_path = transform(raw_path)
-    new_records = filter_cached_urls(transformed_path)
-    batch_ids = stage_batches_to_bq(new_records)
+    new_records = filter_cached_urls(transformed_path, run_id=run_id)
+    batch_ids = stage_batches_to_bq(uncached_parquet_path=new_records, run_id=run_id, batch_size=BATCH_SIZE)
 
     fetched = fetch_urls.expand(batch_id=batch_ids)
     categorized = categorize.expand(batch_with_texts=fetched)

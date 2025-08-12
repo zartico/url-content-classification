@@ -29,8 +29,9 @@
 
 
 from pyspark.sql import DataFrame
+from pyspark.sql.types import StringType
 from pyspark.sql.functions import (
-    col, when, lower, trim, lit, concat, concat_ws
+    col, when, lower, trim, lit, concat, sha2
 )
 
 def transform_data(df: DataFrame) -> DataFrame:
@@ -58,8 +59,10 @@ def transform_data(df: DataFrame) -> DataFrame:
         .otherwise(concat(lit("https://"), col("trimmed_page_url")))
     )
 
-    df_result = df_transformed.filter(col("page_url").isNotNull()) \
-                              .dropDuplicates(["page_url", "client_id"])
+    df_result = df_transformed.withColumn(
+        "url_hash",
+        sha2(col("trimmed_page_url").cast(StringType()), 256)
+    )
     
     print(f"[TRANSFORM] Cleaned/built URLs for {df_result.count()} rows")
     return df_result
