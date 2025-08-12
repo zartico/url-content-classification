@@ -131,7 +131,7 @@ def url_content_backfill():
             spark, df,
             run_id=run_id,
             include_staging_check=True,
-            taging_table=f"{PROJECT_ID}.{BQ_DATASET_ID}.staging_url_batches",
+            staging_table=f"{PROJECT_ID}.{BQ_DATASET_ID}.staging_url_batches",
             temp_gcs_bucket=TEMP_BUCKET
         )
         print(f"[FILTER] Filtered cached URLs, remaining {uncached_df.count()} uncached rows")
