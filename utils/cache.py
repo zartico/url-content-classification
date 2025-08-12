@@ -2,6 +2,8 @@ from pyspark.sql import DataFrame
 from pyspark.sql.functions import col, sha2, lit
 from pyspark.sql import functions as F
 from pyspark.sql.types import StringType
+from pyspark.sql.window import Window
+
 
 from config.project_config import PROJECT_ID, BQ_DATASET_ID, BQ_TABLE_ID
 from google.cloud import bigquery
@@ -204,7 +206,7 @@ def filter_cache_spark(
         .withColumn(
             "rn",
             F.row_number().over(
-                F.Window.partitionBy("url_hash").orderBy(col("url_len").asc(), col("page_url").asc())
+                Window.partitionBy("url_hash").orderBy(col("url_len").asc(), col("page_url").asc())
             )
         )
         .filter(col("rn") == 1)
