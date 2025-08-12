@@ -389,7 +389,7 @@ def url_content_backfill():
     batch_ids = stage_batches_to_bq(uncached_parquet_path=new_records, batch_size=BATCH_SIZE, run_id=run_id)
 
     fetched = fetch_urls.expand(batch_id=batch_ids)
-    categorized = categorize.expand(batch_ids=batch_ids)
+    categorized = categorize.expand(batch_id=batch_ids)
     # Categorize waits for corresponding fetch to complete
     fetched >> categorized
     load.expand(batch_rows=categorized)
