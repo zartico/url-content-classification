@@ -1,5 +1,6 @@
 from pyspark.sql import DataFrame
-from pyspark.sql.functions import col, sha2, F
+from pyspark.sql.functions import col, sha2, lit
+from pyspark.sql import functions as F
 from pyspark.sql.types import StringType
 
 from config.project_config import PROJECT_ID, BQ_DATASET_ID, BQ_TABLE_ID
