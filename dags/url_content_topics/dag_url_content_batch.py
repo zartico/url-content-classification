@@ -34,8 +34,8 @@ from utils.web_fetch import fetch_all_pages, extract_visible_text
 from src.categorize import categorize_urls
 from src.load import load_data
 
-BATCH_SIZE = 100
-TOTAL_URLS = 2000
+BATCH_SIZE = 500
+TOTAL_URLS = 10000
 MAX_DYNAMIC_TASKS = 500
 
 # Use the GCS bucket configured in Airflow Variables
@@ -292,7 +292,7 @@ def url_content_backfill():
         # print(f"[STAGE] Created {len(batch_ids)} batches of size ~{batch_size}")
         # return batch_ids
 
-    @task(task_id="fetch_urls", retries=3, retry_delay=timedelta(minutes=3), max_active_tis_per_dag=5)
+    @task(task_id="fetch_urls", retries=3, retry_delay=timedelta(minutes=3), max_active_tis_per_dag=10, pool = "fetch")
     def fetch_urls(batch_id: str):
         print("[FETCH] Fetching URLs in batch")
         client = bigquery.Client()
@@ -302,7 +302,7 @@ def url_content_backfill():
         """).to_dataframe()
 
         urls = df["page_url"].tolist()
-        page_texts = asyncio.run(fetch_all_pages(urls, max_concurrent=8))
+        page_texts = asyncio.run(fetch_all_pages(urls, max_concurrent=100))
 
         df["page_text"] = df["page_url"].apply(
             lambda url: extract_visible_text(page_texts.get(url, ""))
@@ -336,7 +336,7 @@ def url_content_backfill():
 
         # return batch_chunk
 
-    @task(task_id="categorize_urls", retries=3, retry_delay=timedelta(minutes=3), max_active_tis_per_dag=5, pool = "nlp", trigger_rule=TriggerRule.ALL_DONE)
+    @task(task_id="categorize_urls", retries=3, retry_delay=timedelta(minutes=3), max_active_tis_per_dag=14, pool = "nlp", trigger_rule=TriggerRule.ALL_DONE)
     def categorize(batch_id: str):
         print("[CATEGORIZE] Starting URL categorization")
         #df_page_text = pd.DataFrame(batch_with_texts)

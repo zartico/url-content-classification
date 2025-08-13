@@ -81,7 +81,7 @@ async def fetch_all_pages(urls: list[str], max_concurrent: int) -> dict[str, str
     results = {}
 
     semaphore = asyncio.Semaphore(max_concurrent)
-    connector = aiohttp.TCPConnector(limit=max_concurrent, limit_per_host=2)
+    connector = aiohttp.TCPConnector(limit=max_concurrent, limit_per_host=3)
 
     async def fetch_with_semaphore(session, url):
         async with semaphore:
