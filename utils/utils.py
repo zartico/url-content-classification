@@ -4,7 +4,7 @@ import time
 
 # === Quota Config ===
 DAILY_LIMIT = 750000  # ~94% of 800,000 GCP API daily limit
-MINUTE_LIMIT = 550  # ~94% of 600 API calls per minute
+MINUTE_LIMIT = 4500  # ~94% of 5,000 GCP API per-minute limit
 
 # === Variable Keys ===
 VAR_DAY_COUNT = "nlp_day_count"

@@ -77,6 +77,7 @@ def create_spark_session():
     start_date=days_ago(1),
     catchup=False,
     tags=["url-content"],
+    max_active_runs=1,
 )
 def url_content_backfill():
     @task(task_id="make_run_id", retries=0, retry_delay=timedelta(minutes=0))
