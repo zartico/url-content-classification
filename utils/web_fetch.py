@@ -27,7 +27,7 @@ async def fetch_aiohttp(session, url: str) -> tuple[str, str | None]:
             content = await resp.text()
             print(f"[AIOHTTP] Fetched {len(content)} characters from {url}")
             return url, content
-    except (aiohttp.ClientTimeout, aiohttp.ClientConnectorError, asyncio.TimeoutError) as e:
+    except (aiohttp.ClientError, aiohttp.ClientConnectorError, asyncio.TimeoutError) as e:
         print(f"[AIOHTTP-TIMEOUT] {url}: {e}")
         return url, None
     except Exception as e:
@@ -92,9 +92,18 @@ async def fetch_all_pages(urls: list[str], max_concurrent: int) -> dict[str, str
             aio_tasks = [fetch_with_semaphore(session, url) for url in urls]
             aio_results = await asyncio.gather(*aio_tasks, return_exceptions=True)
 
-        for result in aio_results:
+        for i, result in enumerate(aio_results):
+            url_from_list = urls[i]
+
             if isinstance(result, Exception):
-                print(f"[FETCH-ERROR] Exception in async aiohttp gather: {result}")
+                print(f"[FETCH-ERROR] Exception in async aiohttp gather for {url_from_list}: {result}")
+                url, html = fetch_requests(url_from_list)
+                if html:
+                    results[url] = html
+                    continue
+                print(f"[FETCH] Requests failed for {url_from_list}, trying Playwright")
+                url, html = await fetch_playwright(url_from_list)
+                results[url] = html if html else "[ERROR] All methods failed"
                 continue
 
             url, html = result
