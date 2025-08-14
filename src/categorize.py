@@ -1,7 +1,7 @@
 from config.project_config import PROJECT_ID, BQ_DATASET_ID, BQ_TABLE_ID
 from utils.cache import hash_url, get_result_columns
 from utils.category_mapping import map_to_zartico_category
-from utils.utils import is_homepage, check_and_increment_quota
+from utils.utils import is_homepage
 from google.cloud import language_v1, bigquery
 from google.api_core.retry import Retry, if_exception_type
 from google.api_core import exceptions
