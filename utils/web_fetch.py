@@ -10,7 +10,7 @@ from pathlib import Path
 import fcntl  # Linux-only; Composer workers are Linux
 from playwright.async_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
-from utils import _looks_internal_for_pw
+from .utils import looks_internal_for_pw
 
 HEADERS = {
     "User-Agent": (
@@ -220,7 +220,7 @@ async def fetch_all_pages(urls: list[str], max_concurrent: int, limit_per_host: 
                 print(f"[FETCH] Requests failed for {url_from_list}, trying Playwright")
 
                 # Skip playwright for internal/non-public domains
-                if _looks_internal_for_pw(url_from_list):
+                if looks_internal_for_pw(url_from_list):
                     results[url_from_list] = "[ERROR] Internal/non-public domain"
                     continue            
 
@@ -241,7 +241,7 @@ async def fetch_all_pages(urls: list[str], max_concurrent: int, limit_per_host: 
                 continue
 
             # Skip playwright for internal/non-public domains
-            if _looks_internal_for_pw(url_from_list):
+            if looks_internal_for_pw(url_from_list):
                 results[url_from_list] = "[ERROR] Internal/non-public domain"
                 continue 
 

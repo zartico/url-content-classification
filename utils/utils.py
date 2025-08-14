@@ -5,7 +5,7 @@ import ipaddress
 from urllib.parse import urlparse
 
 # obvious non-publics
-def _looks_internal_for_pw(u: str) -> bool:
+def looks_internal_for_pw(u: str) -> bool:
     from urllib.parse import urlparse
     try:
         h = (urlparse(u).hostname or "").lower()
