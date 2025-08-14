@@ -6,6 +6,10 @@ import requests
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
+import os, subprocess, time
+from pathlib import Path
+import fcntl  # Linux-only; Composer workers are Linux
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -19,16 +23,61 @@ HEADERS = {
     "Connection": "keep-alive",
 }
 
+# Ensure browsers are stored on local disk, not GCS FUSE
+BROWSERS_PATH = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "/home/airflow/.cache/ms-playwright")
+os.environ["PLAYWRIGHT_BROWSERS_PATH"] = BROWSERS_PATH
+
+_INSTALL_SENTINEL = Path(BROWSERS_PATH) / ".chromium_installed"
+_INSTALL_LOCK = Path(BROWSERS_PATH) / ".install.lock"
+
+def ensure_playwright_browsers_installed() -> bool:
+    """
+    Ensure Chromium is installed for Playwright on this worker.
+    Uses a file lock so only one process downloads at a time.
+    Returns True if browsers are installed (now or already), else False.
+    """
+    try:
+        if _INSTALL_SENTINEL.exists():
+            return True
+
+        _INSTALL_SENTINEL.parent.mkdir(parents=True, exist_ok=True)
+        with open(_INSTALL_LOCK, "w") as lf:
+            # Exclusive lock so concurrent tasks don't both download
+            fcntl.flock(lf, fcntl.LOCK_EX)
+            # Another process may have finished while we waited
+            if _INSTALL_SENTINEL.exists():
+                fcntl.flock(lf, fcntl.LOCK_UN)
+                return True
+
+            print("[PLAYWRIGHT-INSTALL] Downloading Chromium to", BROWSERS_PATH)
+            # Do NOT use --with-deps inside Composer; not allowed to apt-get
+            subprocess.run(
+                ["python", "-m", "playwright", "install", "chromium"],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            _INSTALL_SENTINEL.touch()
+            fcntl.flock(lf, fcntl.LOCK_UN)
+            print("[PLAYWRIGHT-INSTALL] Completed")
+            return True
+    except subprocess.CalledProcessError as e:
+        print("[PLAYWRIGHT-INSTALL-ERROR] Installer failed:\n", e.stdout)
+    except Exception as e:
+        print(f"[PLAYWRIGHT-INSTALL-ERROR] {e}")
+    return False
+
 async def fetch_aiohttp(session, url: str) -> tuple[str, str | None]:
-    await asyncio.sleep(random.uniform(0.5, 1.5))  # jitter
+    await asyncio.sleep(random.uniform(0.05, 0.25))  # jitter
     try:
         async with session.get(url, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=10)) as resp:
             print(f"[AIOHTTP] {url} - {resp.status}")
             content = await resp.text()
             print(f"[AIOHTTP] Fetched {len(content)} characters from {url}")
             return url, content
-    except (aiohttp.ClientError, aiohttp.ClientConnectorError, asyncio.TimeoutError) as e:
-        print(f"[AIOHTTP-TIMEOUT] {url}: {e}")
+    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+        print(f"[AIOHTTP-ERROR] {url}: {e}")
         return url, None
     except Exception as e:
         print(f"[AIOHTTP-ERROR] {url}: {e}")
@@ -48,40 +97,95 @@ def fetch_requests(url: str) -> tuple[str, str | None]:
         print(f"[REQUESTS-ERROR] {url}: {e}")
         return url, None
 
+PLAYWRIGHT_ENABLED = True  # circuit-breaker to avoid repeated failures
 
 async def fetch_playwright(url: str) -> tuple[str, str | None]:
-    browser = None
+    global PLAYWRIGHT_ENABLED
+    if not PLAYWRIGHT_ENABLED:
+        return url, None
+
+    async def _try_launch():
+        from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
+        browser = None
+        try:
+            async with async_playwright() as p:
+                # --no-sandbox is often safer in containerized envs;
+                # remove if you have sandbox working.
+                browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
+                context = await browser.new_context()
+                page = await context.new_page()
+                response = await page.goto(url, timeout=15000)
+                content = await page.content()
+                status = response.status if response else "?"
+                print(f"[PLAYWRIGHT] {url} - {status}")
+                return content
+        except PlaywrightTimeoutError:
+            print(f"[PLAYWRIGHT-TIMEOUT] {url}")
+            return None
+        finally:
+            if browser:
+                try:
+                    await browser.close()
+                except Exception as e:
+                    print(f"[PLAYWRIGHT-CLEANUP] {url}: {e}")
+
+    # First attempt: will fail fast if browsers not present
     try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            context = await browser.new_context()
-            page = await context.new_page()
-            response = await page.goto(url, timeout=15000)
-            content = await page.content()
-            status = response.status if response else "?"
-            print(f"[PLAYWRIGHT] {url} - {status}")
-            print(f"[PLAYWRIGHT] Fetched {len(content)} characters from {url}")
-            return url, content
-    except PlaywrightTimeoutError:
-        print(f"[PLAYWRIGHT-TIMEOUT] {url}")
+        content = await _try_launch()
+        return (url, content) if content else (url, None)
     except Exception as e:
-        print(f"[PLAYWRIGHT-ERROR] {url}: {e}")
-    finally:
-        if browser:
-            try:
-                await browser.close()
-                print(f"[PLAYWRIGHT] Browser closed for {url}")
-            except Exception as e:
-                print(f"[PLAYWRIGHT-CLEANUP-ERROR] {url}: {e}")
-    
+        msg = str(e)
+        needs_install = ("Executable doesn't exist" in msg) or ("playwright install" in msg)
+        if not needs_install:
+            print(f"[PLAYWRIGHT-ERROR] {url}: {e}")
+            return url, None
+
+    # On-demand install (one per worker), then retry once
+    if ensure_playwright_browsers_installed():
+        try:
+            content = await _try_launch()
+            return (url, content) if content else (url, None)
+        except Exception as e:
+            print(f"[PLAYWRIGHT-ERROR-AFTER-INSTALL] {url}: {e}")
+
+    # Disable for the rest of the run on this process
+    PLAYWRIGHT_ENABLED = False
+    print("[PLAYWRIGHT-DISABLED] Could not launch even after install; disabling fallback.")
     return url, None
 
+# async def fetch_playwright(url: str) -> tuple[str, str | None]:
+#     browser = None
+#     try:
+#         async with async_playwright() as p:
+#             browser = await p.chromium.launch(headless=True)
+#             context = await browser.new_context()
+#             page = await context.new_page()
+#             response = await page.goto(url, timeout=15000)
+#             content = await page.content()
+#             status = response.status if response else "?"
+#             print(f"[PLAYWRIGHT] {url} - {status}")
+#             print(f"[PLAYWRIGHT] Fetched {len(content)} characters from {url}")
+#             return url, content
+#     except PlaywrightTimeoutError:
+#         print(f"[PLAYWRIGHT-TIMEOUT] {url}")
+#     except Exception as e:
+#         print(f"[PLAYWRIGHT-ERROR] {url}: {e}")
+#     finally:
+#         if browser:
+#             try:
+#                 await browser.close()
+#                 print(f"[PLAYWRIGHT] Browser closed for {url}")
+#             except Exception as e:
+#                 print(f"[PLAYWRIGHT-CLEANUP-ERROR] {url}: {e}")
+    
+#     return url, None
 
-async def fetch_all_pages(urls: list[str], max_concurrent: int) -> dict[str, str]:
+
+async def fetch_all_pages(urls: list[str], max_concurrent: int, limit_per_host: int) -> dict[str, str]:
     results = {}
 
     semaphore = asyncio.Semaphore(max_concurrent)
-    connector = aiohttp.TCPConnector(limit=max_concurrent, limit_per_host=3)
+    connector = aiohttp.TCPConnector(limit=max_concurrent, limit_per_host=limit_per_host)
 
     async def fetch_with_semaphore(session, url):
         async with semaphore:
@@ -135,6 +239,8 @@ async def fetch_all_pages(urls: list[str], max_concurrent: int) -> dict[str, str
     return results
 
 def extract_visible_text(html: str) -> str:
+    if not html or (isinstance(html, str) and html.startswith("[ERROR]")):
+        return ""
     soup = BeautifulSoup(html, "html.parser")
     # Remove scripts and styles
     for tag in soup(["script", "style", "noscript"]):

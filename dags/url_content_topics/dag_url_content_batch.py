@@ -34,8 +34,8 @@ from utils.web_fetch import fetch_all_pages, extract_visible_text
 from src.categorize import categorize_urls
 from src.load import load_data
 
-BATCH_SIZE = 500
-TOTAL_URLS = 10000
+BATCH_SIZE = 100
+TOTAL_URLS = 2000
 MAX_DYNAMIC_TASKS = 500
 
 # Use the GCS bucket configured in Airflow Variables
@@ -97,10 +97,6 @@ def url_content_backfill():
         print(f"[EXTRACT] Extracted {raw_df.count()} rows from BigQuery")
         spark.stop()
         return temp_path
-        # Pandas version (without spark)
-        # raw_df = extract_data(PROJECT_ID, GA4_DATASET_ID, GA4_TABLE_ID, TOTAL_URLS)
-        # print(f"[EXTRACT] Extracted {len(raw_df)} rows from BigQuery")
-        # return raw_df.to_dict(orient="records")
 
     @task(task_id="transform_data", retries=0, retry_delay=timedelta(minutes=0), pool = "spark")
     def transform(raw_path):
@@ -115,11 +111,7 @@ def url_content_backfill():
         transformed_df.write.mode("overwrite").parquet(temp_path)
         spark.stop()
         return temp_path
-        # Pandas version (without spark)
-        # raw_df = pd.DataFrame(raw_path)
-        # transformed_df = transform_data(raw_df)
-        # print(f"[TRANSFORM] Transformed/Cleaned {len(transformed_df)} rows")
-        # return transformed_df.to_dict(orient="records")
+
 
     @task(task_id="filter_urls", retries=0, retry_delay=timedelta(minutes=0), pool = "spark")
     def filter_cached_urls(transformed_path, run_id: str):
@@ -141,12 +133,6 @@ def url_content_backfill():
         uncached_df.write.mode("overwrite").parquet(temp_path)
         spark.stop()
         return temp_path
-        # Pandas version (without spark)
-        # df = pd.DataFrame(transformed_path)
-        # print(f"[FILTER] Loaded from transformed data with {len(df)} rows")
-        # uncached_df = filter_cache(df)
-        # print(f"[FILTER] Filtered cached URLs, remaining {len(uncached_df)} uncached rows")
-        # return uncached_df.to_dict(orient="records")
     
     @task(task_id="stage_batches_bq", retries=0, pool="spark")
     def stage_batches_to_bq(uncached_parquet_path: str, batch_size: int, run_id: str) -> list[str]:
@@ -233,65 +219,6 @@ def url_content_backfill():
         spark.stop()
         return batch_ids
 
-
-
-    # @task(task_id="stage_batches_bq", retries=0, retry_delay=timedelta(minutes=0), pool = "spark")
-    # def stage_batches_to_bq(records, run_id: str,  batch_size: int = BATCH_SIZE) -> list[str]:
-    #     """Chunks records and inserts them into BQ with unique batch_id"""
-    #     # Spark version for backfill
-    #     spark = create_spark_session()
-    #     print(f"[STAGE] Reading uncached parquet from {records}")
-    #     df = spark.read.parquet(records)
-
-    #     count = df.count()
-    #     if count == 0:
-    #         print("[STAGE] No rows to stage.")
-    #         return []
-
-    #     # Assign row index and compute batch group
-    #     df_with_id = df.withColumn("row_num", monotonically_increasing_id())
-    #     df_with_batch = df_with_id.withColumn("batch_index", floor(col("row_num") / batch_size))
-
-    #     # Get distinct batch indices to generate unique UUIDs
-    #     batch_indices = df_with_batch.select("batch_index").distinct().rdd.flatMap(lambda x: x).collect()
-    #     batch_uuid_map = {idx: str(uuid.uuid4()) for idx in batch_indices}
-
-    #     def assign_batch_id(index):
-    #         return batch_uuid_map.get(index, str(uuid.uuid4()))
-
-    #     assign_batch_id_udf = udf(assign_batch_id, StringType())
-    #     final_df = df_with_batch.withColumn("batch_id", assign_batch_id_udf(col("batch_index"))).drop("row_num", "batch_index")
-
-    #     print(f"[STAGE] Prepared {final_df.count()} rows with {len(batch_uuid_map)} unique batch_ids")
-
-    #     # Write to BigQuery
-    #     final_df.write \
-    #         .format("bigquery") \
-    #         .option("table", f"{PROJECT_ID}.{BQ_DATASET_ID}.staging_url_batches") \
-    #         .option("temporaryGcsBucket", TEMP_BUCKET) \
-    #         .mode("append") \
-    #         .save()
-
-    #     spark.stop()
-    #     return list(batch_uuid_map.values())
-    
-        # Pandas version (without spark)
-        # bq_client = bigquery.Client()
-        # staging_table = f"{PROJECT_ID}.{BQ_DATASET_ID}.staging_url_batches"
-        # batch_ids = []
-
-        # for i in range(0, len(records), batch_size):
-        #     chunk = records[i:i+batch_size]
-        #     batch_id = str(uuid.uuid4())
-        #     for r in chunk:
-        #         r["batch_id"] = batch_id
-        #     df = pd.DataFrame(chunk)
-        #     bq_client.load_table_from_dataframe(df, staging_table).result()
-        #     batch_ids.append(batch_id)
-
-        # print(f"[STAGE] Created {len(batch_ids)} batches of size ~{batch_size}")
-        # return batch_ids
-
     @task(task_id="fetch_urls", retries=3, retry_delay=timedelta(minutes=3), max_active_tis_per_dag=10, pool = "fetch")
     def fetch_urls(batch_id: str):
         print("[FETCH] Fetching URLs in batch")
@@ -302,7 +229,7 @@ def url_content_backfill():
         """).to_dataframe()
 
         urls = df["page_url"].tolist()
-        page_texts = asyncio.run(fetch_all_pages(urls, max_concurrent=100))
+        page_texts = asyncio.run(fetch_all_pages(urls, max_concurrent=100, limit_per_host=3))
 
         df["page_text"] = df["page_url"].apply(
             lambda url: extract_visible_text(page_texts.get(url, ""))
@@ -320,21 +247,6 @@ def url_content_backfill():
 
         client.load_table_from_dataframe(df, staging_table).result()
         return batch_id 
-    
-        # return df.to_dict(orient="records")
-        # print("[FETCH] Fetching URLs in batch")
-        # urls = [x["page_url"] for x in batch_chunk]
-        # page_texts = asyncio.run(fetch_all_pages(urls))
-        # for x in batch_chunk:
-        #     html = page_texts.get(x["page_url"], "")
-        #     x["page_text"] = extract_visible_text(html) if html else ""
-        # print(f"[FETCH] Fetched page text for {len(batch_chunk)} URLs")
-
-        # import json
-        # payload = json.dumps(batch_chunk)
-        # print(f"[FETCH] Payload size: {len(payload)} bytes")
-
-        # return batch_chunk
 
     @task(task_id="categorize_urls", retries=3, retry_delay=timedelta(minutes=3), max_active_tis_per_dag=14, pool = "nlp", trigger_rule=TriggerRule.ALL_DONE)
     def categorize(batch_id: str):
@@ -354,22 +266,12 @@ def url_content_backfill():
         categorized_df = categorize_urls(df)
         print(f"[CATEGORIZE] Categorized {len(categorized_df)} URLs")
         return categorized_df.to_dict(orient="records")
-        # temp_path = "/home/airflow/gcs/data/url_content_topics/tmp/categorized.csv"
-        # categorized_df.to_csv(temp_path, index=False)
-        # print(f"[CATEGORIZE] Categorized data written to: {temp_path}")
-        # return temp_path
+
 
     @task(task_id="load_data", retries=0, retry_delay=timedelta(minutes=0))
     def load(batch_rows):
         print("[LOAD] Loading categorized data into BigQuery")
-        # categorized_pd_df = pd.read_csv(categorized_path)
-        # if categorized_pd_df.empty:
-        #     print("[WARNING] No data to load. DataFrame is empty.")
-        #     return "No data loaded"
-        # spark = create_spark_session()
-        # new_data = spark.createDataFrame(batch_rows)
-        # load_data(new_data)
-        # spark.stop()
+
         if not batch_rows:
             print("[LOAD] No data to load.")
             return "Skipped"
