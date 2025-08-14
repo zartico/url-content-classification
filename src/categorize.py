@@ -99,8 +99,6 @@ def categorize_urls(df):
         last_accesseds.append(now_ts)
         
         try: # Classify the text using NLP
-            # Check quota before proceeding 
-            # check_and_increment_quota()
             categories = classify_text(page_text, nlp_client)
             print(f"[DEBUG] Categories returned for {page_url}: {categories}")
             if categories:

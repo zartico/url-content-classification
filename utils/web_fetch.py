@@ -4,11 +4,13 @@ import asyncio
 import random
 import requests
 from bs4 import BeautifulSoup
-from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
 import os, subprocess, time
 from pathlib import Path
 import fcntl  # Linux-only; Composer workers are Linux
+from playwright.async_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError
+from playwright.async_api import async_playwright
+from utils import _looks_internal_for_pw
 
 HEADERS = {
     "User-Agent": (
@@ -77,10 +79,10 @@ async def fetch_aiohttp(session, url: str) -> tuple[str, str | None]:
             print(f"[AIOHTTP] Fetched {len(content)} characters from {url}")
             return url, content
     except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-        print(f"[AIOHTTP-ERROR] {url}: {e}")
+        print(f"[AIOHTTP-ERROR] {url}: {e.__class__.__name__}: {e}")
         return url, None
     except Exception as e:
-        print(f"[AIOHTTP-ERROR] {url}: {e}")
+        print(f"[AIOHTTP-ERROR] {url}:{e.__class__.__name__}: {e}")
         return url, None
 
 
@@ -99,6 +101,11 @@ def fetch_requests(url: str) -> tuple[str, str | None]:
 
 PLAYWRIGHT_ENABLED = True  # circuit-breaker to avoid repeated failures
 
+def _is_launch_error(msg: str) -> bool:
+    # Messages that imply browser binaries missing / launch impossible
+    return ("Executable doesn't exist" in msg) or ("Failed to launch" in msg) or ("browserType.launch" in msg)
+
+
 async def fetch_playwright(url: str) -> tuple[str, str | None]:
     global PLAYWRIGHT_ENABLED
     if not PLAYWRIGHT_ENABLED:
@@ -109,8 +116,6 @@ async def fetch_playwright(url: str) -> tuple[str, str | None]:
         browser = None
         try:
             async with async_playwright() as p:
-                # --no-sandbox is often safer in containerized envs;
-                # remove if you have sandbox working.
                 browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
                 context = await browser.new_context()
                 page = await context.new_page()
@@ -137,7 +142,7 @@ async def fetch_playwright(url: str) -> tuple[str, str | None]:
         msg = str(e)
         needs_install = ("Executable doesn't exist" in msg) or ("playwright install" in msg)
         if not needs_install:
-            print(f"[PLAYWRIGHT-ERROR] {url}: {e}")
+            print(f"[PLAYWRIGHT-ERROR] {url}: {e.__class__.__name__}: {msg}")
             return url, None
 
     # On-demand install (one per worker), then retry once
@@ -146,7 +151,14 @@ async def fetch_playwright(url: str) -> tuple[str, str | None]:
             content = await _try_launch()
             return (url, content) if content else (url, None)
         except Exception as e:
-            print(f"[PLAYWRIGHT-ERROR-AFTER-INSTALL] {url}: {e}")
+            msg = str(e)
+            # Disable only if it's still a launch/executable problem
+            if _is_launch_error(msg):
+                PLAYWRIGHT_ENABLED = False
+                print("[PLAYWRIGHT-DISABLED] Browser launch failure after install; disabling fallback.")
+            else:
+                print(f"[PLAYWRIGHT-ERROR-AFTER-INSTALL] {url}: {e.__class__.__name__}: {msg}")
+            return url, None
 
     # Disable for the rest of the run on this process
     PLAYWRIGHT_ENABLED = False
@@ -206,6 +218,12 @@ async def fetch_all_pages(urls: list[str], max_concurrent: int, limit_per_host: 
                     results[url] = html
                     continue
                 print(f"[FETCH] Requests failed for {url_from_list}, trying Playwright")
+
+                # Skip playwright for internal/non-public domains
+                if _looks_internal_for_pw(url_from_list):
+                    results[url_from_list] = "[ERROR] Internal/non-public domain"
+                    continue            
+
                 url, html = await fetch_playwright(url_from_list)
                 results[url] = html if html else "[ERROR] All methods failed"
                 continue
@@ -221,6 +239,11 @@ async def fetch_all_pages(urls: list[str], max_concurrent: int, limit_per_host: 
             if html:
                 results[url] = html
                 continue
+
+            # Skip playwright for internal/non-public domains
+            if _looks_internal_for_pw(url_from_list):
+                results[url_from_list] = "[ERROR] Internal/non-public domain"
+                continue 
 
             # Try Playwright
             print(f"[FETCH] Requests failed for {url}, trying Playwright")
