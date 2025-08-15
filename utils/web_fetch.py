@@ -10,7 +10,7 @@ from pathlib import Path
 import fcntl  # Linux-only; Composer workers are Linux
 from playwright.async_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
-from .utils import looks_internal_for_pw
+from .utils import _should_skip_blocked, _backoff_delay, _retry_after_seconds, _looks_internal_for_pw
 
 HEADERS = {
     "User-Agent": (
@@ -31,6 +31,9 @@ os.environ["PLAYWRIGHT_BROWSERS_PATH"] = BROWSERS_PATH
 
 _INSTALL_SENTINEL = Path(BROWSERS_PATH) / ".chromium_installed"
 _INSTALL_LOCK = Path(BROWSERS_PATH) / ".install.lock"
+
+_MAX_AIOHTTP_RETRIES = 2  # total tries = first + 2 retries on 429/5xx/timeout
+_AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=20, connect=5, sock_connect=5, sock_read=15)
 
 def ensure_playwright_browsers_installed() -> bool:
     """
@@ -72,33 +75,146 @@ def ensure_playwright_browsers_installed() -> bool:
 
 async def fetch_aiohttp(session, url: str) -> tuple[str, str | None]:
     await asyncio.sleep(random.uniform(0.05, 0.25))  # jitter
-    timeout = aiohttp.ClientTimeout(total=20, connect=5, sock_connect=5, sock_read=15)
-    try:
-        async with session.get(url, headers=HEADERS, timeout=timeout) as resp:
-            print(f"[AIOHTTP] {url} - {resp.status}")
-            content = await resp.text()
-            print(f"[AIOHTTP] Fetched {len(content)} characters from {url}")
-            return url, content
-    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-        print(f"[AIOHTTP-ERROR] {url}: {e.__class__.__name__}: {e}")
-        return url, None
-    except Exception as e:
-        print(f"[AIOHTTP-ERROR] {url}:{e.__class__.__name__}: {e}")
-        return url, None
+    attempt = 0
+    while True:
+        try:
+            async with session.get(url, headers=HEADERS, timeout=_AIOHTTP_TIMEOUT) as resp:
+                status = resp.status
 
+                # Fast terminal skips (no body read, no retries)
+                if status in (404, 410):
+                    print(f"[AIOHTTP] {url} - {status} (terminal skip)")
+                    return url, f"[SKIP:{status}]"
+
+                # Blocked/unauthorized heuristics (read a small sample only)
+                if status in (401, 403):
+                    sample = await resp.content.read(16384)
+                    enc = resp.charset or "utf-8"
+                    try:
+                        text_sample = sample.decode(enc, errors="ignore")
+                    except Exception:
+                        text_sample = sample.decode("utf-8", errors="ignore")
+
+                    if _should_skip_blocked(text_sample, len(sample)):
+                        print(f"[AIOHTTP] {url} - {status} (blocked; skip)")
+                        return url, "[SKIP:403_BLOCKED]"
+                    # If it looks like a real page despite 403, keep full body
+                    body = text_sample + (await resp.text())[len(text_sample):]
+                    print(f"[AIOHTTP] {url} - {status} (keeping {len(body)} chars)")
+                    return url, body
+
+                # Success
+                if 200 <= status < 300:
+                    body = await resp.text()
+                    print(f"[AIOHTTP] {url} - {status}")
+                    print(f"[AIOHTTP] Fetched {len(body)} characters from {url}")
+                    return url, body
+
+                # Transient server or rate-limit errors → retry with backoff
+                if status == 429 or 500 <= status < 600:
+                    # Honor Retry-After if present
+                    ra = _retry_after_seconds(resp.headers) or 0.0
+                    delay = max(ra, _backoff_delay(attempt))
+                    if attempt < _MAX_AIOHTTP_RETRIES:
+                        attempt += 1
+                        print(f"[AIOHTTP-RETRY] {url} - {status}; sleeping {delay:.2f}s (attempt {attempt})")
+                        await asyncio.sleep(delay)
+                        continue
+                    print(f"[AIOHTTP-GIVEUP] {url} - {status} after {attempt} retries")
+                    return url, None  # let fallbacks try
+
+                # Other client errors → skip (not valuable)
+                if 400 <= status < 500:
+                    print(f"[AIOHTTP] {url} - {status} (client error; skip)")
+                    return url, f"[SKIP:{status}]"
+
+                # Any other unhandled status: be conservative
+                print(f"[AIOHTTP] {url} - {status} (unhandled; skip)")
+                return url, f"[SKIP:{status}]"
+
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            if attempt < _MAX_AIOHTTP_RETRIES:
+                delay = _backoff_delay(attempt, base=0.5)
+                attempt += 1
+                print(f"[AIOHTTP-RETRY] {url}: {e.__class__.__name__}; sleeping {delay:.2f}s (attempt {attempt})")
+                await asyncio.sleep(delay)
+                continue
+            print(f"[AIOHTTP-ERROR] {url}: {e.__class__.__name__}: {e} (giving up)")
+            return url, None
+
+        except Exception as e:
+            print(f"[AIOHTTP-ERROR] {url}: {e.__class__.__name__}: {e} (giving up)")
+            return url, None
+    # timeout = aiohttp.ClientTimeout(total=20, connect=5, sock_connect=5, sock_read=15)
+    # try:
+    #     async with session.get(url, headers=HEADERS, timeout=timeout) as resp:
+    #         print(f"[AIOHTTP] {url} - {resp.status}")
+    #         content = await resp.text()
+    #         print(f"[AIOHTTP] Fetched {len(content)} characters from {url}")
+    #         return url, content
+    # except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+    #     print(f"[AIOHTTP-ERROR] {url}: {e.__class__.__name__}: {e}")
+    #     return url, None
+    # except Exception as e:
+    #     print(f"[AIOHTTP-ERROR] {url}:{e.__class__.__name__}: {e}")
+    #     return url, None
 
 def fetch_requests(url: str) -> tuple[str, str | None]:
     try:
-        r = requests.get(url, headers=HEADERS, timeout=10)
-        print(f"[REQUESTS] {url} - {r.status_code}")
-        print(f"[REQUESTS] {url} fetched with {len(r.text)} characters")
-        return url, r.text
+        r = requests.get(url, headers=HEADERS, timeout=(5, 15), allow_redirects=True)
+        status = r.status_code
+
+        if status in (404, 410):
+            print(f"[REQUESTS] {url} - {status} (terminal skip)")
+            return url, f"[SKIP:{status}]"
+
+        if status in (401, 403):
+            txt = r.text
+            if _should_skip_blocked(txt[:16000], len(txt)):
+                print(f"[REQUESTS] {url} - {status} (blocked; skip)")
+                return url, "[SKIP:403_BLOCKED]"
+            print(f"[REQUESTS] {url} - {status} (keeping {len(txt)} chars)")
+            return url, txt
+
+        if 200 <= status < 300:
+            print(f"[REQUESTS] {url} - {status} ({len(r.text)} chars)")
+            return url, r.text
+
+        if status == 429 or 500 <= status < 600:
+            # one gentle retry so we don't block the event loop too long
+            delay = _backoff_delay(0)
+            print(f"[REQUESTS-RETRY] {url} - {status}; sleeping {delay:.2f}s")
+            time.sleep(delay)
+            r2 = requests.get(url, headers=HEADERS, timeout=(5, 15), allow_redirects=True)
+            if 200 <= r2.status_code < 300:
+                print(f"[REQUESTS] {url} - {r2.status_code} ({len(r2.text)} chars)")
+                return url, r2.text
+            print(f"[REQUESTS-GIVEUP] {url} - {r2.status_code}")
+            return url, None
+
+        # Other 4xx
+        print(f"[REQUESTS] {url} - {status} (client error; skip)")
+        return url, f"[SKIP:{status}]"
+
     except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
         print(f"[REQUESTS-TIMEOUT] {url}: {e}")
         return url, None
     except Exception as e:
         print(f"[REQUESTS-ERROR] {url}: {e}")
         return url, None
+
+# def fetch_requests(url: str) -> tuple[str, str | None]:
+#     try:
+#         r = requests.get(url, headers=HEADERS, timeout=10)
+#         print(f"[REQUESTS] {url} - {r.status_code}")
+#         print(f"[REQUESTS] {url} fetched with {len(r.text)} characters")
+#         return url, r.text
+#     except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+#         print(f"[REQUESTS-TIMEOUT] {url}: {e}")
+#         return url, None
+#     except Exception as e:
+#         print(f"[REQUESTS-ERROR] {url}: {e}")
+#         return url, None
 
 PLAYWRIGHT_ENABLED = True  # circuit-breaker to avoid repeated failures
 
@@ -120,11 +236,29 @@ async def fetch_playwright(url: str) -> tuple[str, str | None]:
                 browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
                 context = await browser.new_context()
                 page = await context.new_page()
-                response = await page.goto(url, timeout=15000)
-                content = await page.content()
-                status = response.status if response else "?"
-                print(f"[PLAYWRIGHT] {url} - {status}")
-                return content
+                resp = await page.goto(url, timeout=15000, wait_until="domcontentloaded")
+                status = resp.status if resp else None
+
+                if status in (404, 410):
+                    print(f"[PLAYWRIGHT] {url} - {status} (terminal skip)")
+                    return "[SKIP:404]"
+                if status in (401, 403):
+                    txt = (await page.content())[:16000]
+                    if _should_skip_blocked(txt, len(txt)):
+                        print(f"[PLAYWRIGHT] {url} - {status} (blocked; skip)")
+                        return "[SKIP:403_BLOCKED]"
+
+                html = await page.content()
+                print(f"[PLAYWRIGHT] {url} - {status if status is not None else '?'}")
+                return html
+                # browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
+                # context = await browser.new_context()
+                # page = await context.new_page()
+                # response = await page.goto(url, timeout=15000)
+                # content = await page.content()
+                # status = response.status if response else "?"
+                # print(f"[PLAYWRIGHT] {url} - {status}")
+                # return content
         except PlaywrightTimeoutError:
             print(f"[PLAYWRIGHT-TIMEOUT] {url}")
             return None
@@ -193,7 +327,7 @@ async def fetch_all_pages(urls: list[str], max_concurrent: int, limit_per_host: 
                 print(f"[FETCH] Requests failed for {url_from_list}, trying Playwright")
 
                 # Skip playwright for internal/non-public domains
-                if looks_internal_for_pw(url_from_list):
+                if _looks_internal_for_pw(url_from_list):
                     results[url_from_list] = "[ERROR] Internal/non-public domain"
                     continue            
 
@@ -214,7 +348,7 @@ async def fetch_all_pages(urls: list[str], max_concurrent: int, limit_per_host: 
                 continue
 
             # Skip playwright for internal/non-public domains
-            if looks_internal_for_pw(url_from_list):
+            if _looks_internal_for_pw(url_from_list):
                 results[url_from_list] = "[ERROR] Internal/non-public domain"
                 continue 
 

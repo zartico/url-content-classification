@@ -219,7 +219,7 @@ def url_content_backfill():
         spark.stop()
         return batch_ids
 
-    @task(task_id="fetch_urls", retries=3, retry_delay=timedelta(minutes=3), max_active_tis_per_dag=10, pool = "fetch")
+    @task(task_id="fetch_urls", retries=3, retry_delay=timedelta(minutes=3), max_active_tis_per_dag=8, pool = "fetch")
     def fetch_urls(batch_id: str):
         print("[FETCH] Fetching URLs in batch")
         client = bigquery.Client()
@@ -229,7 +229,7 @@ def url_content_backfill():
         """).to_dataframe()
 
         urls = df["page_url"].tolist()
-        page_texts = asyncio.run(fetch_all_pages(urls, max_concurrent=100, limit_per_host=2))
+        page_texts = asyncio.run(fetch_all_pages(urls, max_concurrent=100, limit_per_host=1))
 
         df["page_text"] = df["page_url"].apply(
             lambda url: extract_visible_text(page_texts.get(url, ""))
