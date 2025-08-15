@@ -136,7 +136,7 @@ def url_content_backfill():
         return temp_path
     
     @task(task_id="stage_batches_bq", retries=0, pool="spark")
-    def stage_batches_to_bq(uncached_parquet_path: str, run_id: str, num_batches_target: int) -> list[str]:
+    def stage_batches_to_bq(uncached_parquet_path: str, num_batches_target: int, run_id: str) -> list[str]:
         """
         1) Read uncached parquet (must include: url_hash, trimmed_page_url, site, page_url, client_id, access_hits).
         2) Assign deterministic batches of ~batch_size using row_number() over url_hash ordering.
@@ -301,8 +301,8 @@ def url_content_backfill():
     
     batch_ids = stage_batches_to_bq(
         uncached_parquet_path=new_records,
-        run_id=run_id,
         num_batches_target=NUM_BATCHES_TARGET,            # dynamic batching
+        run_id=run_id,
     )
 
     fetched = fetch_urls.expand(batch_id=batch_ids)
