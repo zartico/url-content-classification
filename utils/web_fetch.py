@@ -72,8 +72,9 @@ def ensure_playwright_browsers_installed() -> bool:
 
 async def fetch_aiohttp(session, url: str) -> tuple[str, str | None]:
     await asyncio.sleep(random.uniform(0.05, 0.25))  # jitter
+    timeout = aiohttp.ClientTimeout(total=20, connect=5, sock_connect=5, sock_read=15)
     try:
-        async with session.get(url, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+        async with session.get(url, headers=HEADERS, timeout=timeout) as resp:
             print(f"[AIOHTTP] {url} - {resp.status}")
             content = await resp.text()
             print(f"[AIOHTTP] Fetched {len(content)} characters from {url}")
@@ -165,39 +166,11 @@ async def fetch_playwright(url: str) -> tuple[str, str | None]:
     print("[PLAYWRIGHT-DISABLED] Could not launch even after install; disabling fallback.")
     return url, None
 
-# async def fetch_playwright(url: str) -> tuple[str, str | None]:
-#     browser = None
-#     try:
-#         async with async_playwright() as p:
-#             browser = await p.chromium.launch(headless=True)
-#             context = await browser.new_context()
-#             page = await context.new_page()
-#             response = await page.goto(url, timeout=15000)
-#             content = await page.content()
-#             status = response.status if response else "?"
-#             print(f"[PLAYWRIGHT] {url} - {status}")
-#             print(f"[PLAYWRIGHT] Fetched {len(content)} characters from {url}")
-#             return url, content
-#     except PlaywrightTimeoutError:
-#         print(f"[PLAYWRIGHT-TIMEOUT] {url}")
-#     except Exception as e:
-#         print(f"[PLAYWRIGHT-ERROR] {url}: {e}")
-#     finally:
-#         if browser:
-#             try:
-#                 await browser.close()
-#                 print(f"[PLAYWRIGHT] Browser closed for {url}")
-#             except Exception as e:
-#                 print(f"[PLAYWRIGHT-CLEANUP-ERROR] {url}: {e}")
-    
-#     return url, None
-
-
 async def fetch_all_pages(urls: list[str], max_concurrent: int, limit_per_host: int) -> dict[str, str]:
     results = {}
 
     semaphore = asyncio.Semaphore(max_concurrent)
-    connector = aiohttp.TCPConnector(limit=max_concurrent, limit_per_host=limit_per_host)
+    connector = aiohttp.TCPConnector(limit=max_concurrent, limit_per_host=limit_per_host, ttl_dns_cache=300)
 
     async def fetch_with_semaphore(session, url):
         async with semaphore:

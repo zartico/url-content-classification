@@ -29,13 +29,13 @@ from config.project_config import PROJECT_ID, GA4_DATASET_ID, GA4_TABLE_ID, BQ_T
 from src.load import load_data
 from src.extract import extract_data
 from src.transform import transform_data
-from utils.cache import filter_cache, filter_cache_spark
+from utils.cache import filter_cache_spark
 from utils.web_fetch import fetch_all_pages, extract_visible_text
 from src.categorize import categorize_urls
 from src.load import load_data
 
-BATCH_SIZE = 100
-TOTAL_URLS = 2000
+BATCH_SIZE = 500
+TOTAL_URLS = 10000
 MAX_DYNAMIC_TASKS = 500
 
 # Use the GCS bucket configured in Airflow Variables
@@ -229,7 +229,7 @@ def url_content_backfill():
         """).to_dataframe()
 
         urls = df["page_url"].tolist()
-        page_texts = asyncio.run(fetch_all_pages(urls, max_concurrent=100, limit_per_host=3))
+        page_texts = asyncio.run(fetch_all_pages(urls, max_concurrent=100, limit_per_host=2))
 
         df["page_text"] = df["page_url"].apply(
             lambda url: extract_visible_text(page_texts.get(url, ""))
