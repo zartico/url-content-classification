@@ -5,8 +5,8 @@ from google.cloud import bigquery
 import pandas as pd
 
 
-def extract_data(spark, project_id: str, dataset_id: str, table_id: str, limit: int):
-
+#def extract_data(spark, project_id: str, dataset_id: str, table_id: str, limit: int):
+def extract_data(spark, project_id: str, dataset_id: str, table_id: str):
     """
     Extracts data from a BigQuery table using Spark BigQuery connector
 
@@ -35,8 +35,8 @@ def extract_data(spark, project_id: str, dataset_id: str, table_id: str, limit: 
         .option("parentProject", project_id) \
         .option("viewsEnabled", "true") \
         .option("materializationDataset", dataset_id) \
-        .load() \
-        .limit(limit)
+        .load()
+        #.limit(limit)
     
     # print(f"[INFO] Extracted {len(df)} rows from BigQuery")
     # print(f"[INFO] Extracted {df.count()} rows from BigQuery")

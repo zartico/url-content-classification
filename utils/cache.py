@@ -148,7 +148,7 @@ def filter_cache_spark(
     *,
     run_id: str | None = None,
     include_staging_check: bool = True,
-    staging_table: str = f"{PROJECT_ID}.{BQ_DATASET_ID}.staging_url_batches",
+    staging_table: str = f"{PROJECT_ID}.{BQ_DATASET_ID}.staging_url_info",
     temp_gcs_bucket: str | None = None
 ) -> DataFrame:
     """

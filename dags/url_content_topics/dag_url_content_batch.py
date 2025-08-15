@@ -36,7 +36,7 @@ from src.load import load_data
 
 BATCH_SIZE = 500
 TOTAL_URLS = 10000
-MAX_DYNAMIC_TASKS = 500
+NUM_BATCHES_TARGET = 1000
 
 # Use the GCS bucket configured in Airflow Variables
 TEMP_BUCKET = Variable.get("TEMP_GCS_BUCKET")  # e.g. non-codecs-prod-airflow/data/tmp/spark_staging
@@ -91,7 +91,8 @@ def url_content_backfill():
         # Spark version for backfill
         print("[EXTRACT] Starting data extraction from BigQuery")
         spark = create_spark_session()
-        raw_df = extract_data(spark, PROJECT_ID, GA4_DATASET_ID, GA4_TABLE_ID, TOTAL_URLS)
+        #raw_df = extract_data(spark, PROJECT_ID, GA4_DATASET_ID, GA4_TABLE_ID, TOTAL_URLS)
+        raw_df = extract_data(spark, PROJECT_ID, GA4_DATASET_ID, GA4_TABLE_ID)
         temp_path = "/home/airflow/gcs/data/url_content_topics/tmp/raw.parquet"
         raw_df.write.mode("overwrite").parquet(temp_path)
         print(f"[EXTRACT] Extracted {raw_df.count()} rows from BigQuery")
@@ -125,7 +126,7 @@ def url_content_backfill():
             spark, df,
             run_id=run_id,
             include_staging_check=True,
-            staging_table=f"{PROJECT_ID}.{BQ_DATASET_ID}.staging_url_batches",
+            staging_table=f"{PROJECT_ID}.{BQ_DATASET_ID}.staging_url_info",
             temp_gcs_bucket=TEMP_BUCKET
         )
         print(f"[FILTER] Filtered cached URLs, remaining {uncached_df.count()} uncached rows")
@@ -135,12 +136,12 @@ def url_content_backfill():
         return temp_path
     
     @task(task_id="stage_batches_bq", retries=0, pool="spark")
-    def stage_batches_to_bq(uncached_parquet_path: str, batch_size: int, run_id: str) -> list[str]:
+    def stage_batches_to_bq(uncached_parquet_path: str, run_id: str, num_batches_target: int) -> list[str]:
         """
         1) Read uncached parquet (must include: url_hash, trimmed_page_url, site, page_url, client_id, access_hits).
         2) Assign deterministic batches of ~batch_size using row_number() over url_hash ordering.
         3) Write to a per-run temp BQ table.
-        4) MERGE insert-if-missing into staging_url_batches keyed by (run_id, url_hash).
+        4) MERGE insert-if-missing into staging_url_info keyed by (run_id, url_hash).
         5) Return the list of batch_ids that were staged.
         """
         spark = create_spark_session()
@@ -152,6 +153,14 @@ def url_content_backfill():
         missing = required_cols - set(df.columns)
         if missing:
             raise ValueError(f"[STAGE] Missing required columns in uncached dataset: {missing}")
+
+        uncached_count = df.count()
+        if num_batches_target and num_batches_target > 0:
+            from math import ceil
+            batch_size = max(1, int(ceil(uncached_count / num_batches_target)))
+            print(f"[STAGE] Dynamic: uncached={uncached_count}, target_batches={num_batches_target} -> batch_size={batch_size}")
+        elif not batch_size:
+            raise ValueError("[STAGE] Provide either batch_size or num_batches_target")
 
         # Deterministic row numbers → batch_index
         w = Window.orderBy(F.col("url_hash").asc())
@@ -186,9 +195,9 @@ def url_content_backfill():
             .save())
         print(f"[STAGE] Wrote candidates to {tmp_table}")
 
-        # MERGE insert-if-missing into staging_url_batches (race-safe)
+        # MERGE insert-if-missing into staging_url_info (race-safe)
         client = bigquery.Client(project=PROJECT_ID)
-        staging_table = f"{PROJECT_ID}.{BQ_DATASET_ID}.staging_url_batches"
+        staging_table = f"{PROJECT_ID}.{BQ_DATASET_ID}.staging_url_info"
 
         merge_sql = f"""
         MERGE `{staging_table}` T
@@ -223,13 +232,13 @@ def url_content_backfill():
     def fetch_urls(batch_id: str):
         print("[FETCH] Fetching URLs in batch")
         client = bigquery.Client()
-        staging_table = f"{PROJECT_ID}.{BQ_DATASET_ID}.staging_url_batches"
+        staging_table = f"{PROJECT_ID}.{BQ_DATASET_ID}.staging_url_info"
         df = client.query(f"""
             SELECT * FROM `{staging_table}` WHERE batch_id = '{batch_id}'
         """).to_dataframe()
 
         urls = df["page_url"].tolist()
-        page_texts = asyncio.run(fetch_all_pages(urls, max_concurrent=100, limit_per_host=1))
+        page_texts = asyncio.run(fetch_all_pages(urls, max_concurrent=60, limit_per_host=2))
 
         df["page_text"] = df["page_url"].apply(
             lambda url: extract_visible_text(page_texts.get(url, ""))
@@ -253,7 +262,7 @@ def url_content_backfill():
         print("[CATEGORIZE] Starting URL categorization")
         #df_page_text = pd.DataFrame(batch_with_texts)
         client = bigquery.Client()
-        table_id = f"{PROJECT_ID}.{BQ_DATASET_ID}.staging_url_batches"
+        table_id = f"{PROJECT_ID}.{BQ_DATASET_ID}.staging_url_info"
         df = client.query(f"""
             SELECT * FROM `{table_id}`
             WHERE batch_id = '{batch_id}' AND page_text IS NOT NULL
@@ -289,7 +298,12 @@ def url_content_backfill():
     raw_path = extract()
     transformed_path = transform(raw_path)
     new_records = filter_cached_urls(transformed_path, run_id=run_id)
-    batch_ids = stage_batches_to_bq(uncached_parquet_path=new_records, batch_size=BATCH_SIZE, run_id=run_id)
+    
+    batch_ids = stage_batches_to_bq(
+        uncached_parquet_path=new_records,
+        run_id=run_id,
+        num_batches_target=NUM_BATCHES_TARGET,            # dynamic batching
+    )
 
     fetched = fetch_urls.expand(batch_id=batch_ids)
     categorized = categorize.expand(batch_id=batch_ids)

@@ -82,26 +82,26 @@ async def fetch_aiohttp(session, url: str) -> tuple[str, str | None]:
                 status = resp.status
 
                 # Fast terminal skips (no body read, no retries)
-                if status in (404, 410):
+                if status in (401, 404, 410):
                     print(f"[AIOHTTP] {url} - {status} (terminal skip)")
                     return url, f"[SKIP:{status}]"
 
                 # Blocked/unauthorized heuristics (read a small sample only)
-                if status in (401, 403):
-                    sample = await resp.content.read(16384)
-                    enc = resp.charset or "utf-8"
-                    try:
-                        text_sample = sample.decode(enc, errors="ignore")
-                    except Exception:
-                        text_sample = sample.decode("utf-8", errors="ignore")
+                # if status in (401, 403):
+                #     sample = await resp.content.read(16384)
+                #     enc = resp.charset or "utf-8"
+                #     try:
+                #         text_sample = sample.decode(enc, errors="ignore")
+                #     except Exception:
+                #         text_sample = sample.decode("utf-8", errors="ignore")
 
-                    if _should_skip_blocked(text_sample, len(sample)):
-                        print(f"[AIOHTTP] {url} - {status} (blocked; skip)")
-                        return url, "[SKIP:403_BLOCKED]"
-                    # If it looks like a real page despite 403, keep full body
-                    body = text_sample + (await resp.text())[len(text_sample):]
-                    print(f"[AIOHTTP] {url} - {status} (keeping {len(body)} chars)")
-                    return url, body
+                #     if _should_skip_blocked(text_sample, len(sample)):
+                #         print(f"[AIOHTTP] {url} - {status} (blocked; skip)")
+                #         return url, "[SKIP:403_BLOCKED]"
+                #     # If it looks like a real page despite 403, keep full body
+                #     body = text_sample + (await resp.text())[len(text_sample):]
+                #     print(f"[AIOHTTP] {url} - {status} (keeping {len(body)} chars)")
+                #     return url, body
 
                 # Success
                 if 200 <= status < 300:
@@ -111,7 +111,7 @@ async def fetch_aiohttp(session, url: str) -> tuple[str, str | None]:
                     return url, body
 
                 # Transient server or rate-limit errors → retry with backoff
-                if status == 429 or 500 <= status < 600:
+                if status in (403, 429) or 500 <= status < 600:
                     # Honor Retry-After if present
                     ra = _retry_after_seconds(resp.headers) or 0.0
                     delay = max(ra, _backoff_delay(attempt))
@@ -132,6 +132,10 @@ async def fetch_aiohttp(session, url: str) -> tuple[str, str | None]:
                 print(f"[AIOHTTP] {url} - {status} (unhandled; skip)")
                 return url, f"[SKIP:{status}]"
 
+        except aiohttp.ClientConnectorCertificateError as e:
+            print(f"[AIOHTTP] {url} cert mismatch (terminal skip)")
+            return url, "[SKIP:CERT_MISMATCH]"
+        
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             if attempt < _MAX_AIOHTTP_RETRIES:
                 delay = _backoff_delay(attempt, base=0.5)
@@ -145,19 +149,7 @@ async def fetch_aiohttp(session, url: str) -> tuple[str, str | None]:
         except Exception as e:
             print(f"[AIOHTTP-ERROR] {url}: {e.__class__.__name__}: {e} (giving up)")
             return url, None
-    # timeout = aiohttp.ClientTimeout(total=20, connect=5, sock_connect=5, sock_read=15)
-    # try:
-    #     async with session.get(url, headers=HEADERS, timeout=timeout) as resp:
-    #         print(f"[AIOHTTP] {url} - {resp.status}")
-    #         content = await resp.text()
-    #         print(f"[AIOHTTP] Fetched {len(content)} characters from {url}")
-    #         return url, content
-    # except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-    #     print(f"[AIOHTTP-ERROR] {url}: {e.__class__.__name__}: {e}")
-    #     return url, None
-    # except Exception as e:
-    #     print(f"[AIOHTTP-ERROR] {url}:{e.__class__.__name__}: {e}")
-    #     return url, None
+
 
 def fetch_requests(url: str) -> tuple[str, str | None]:
     try:
@@ -203,18 +195,6 @@ def fetch_requests(url: str) -> tuple[str, str | None]:
         print(f"[REQUESTS-ERROR] {url}: {e}")
         return url, None
 
-# def fetch_requests(url: str) -> tuple[str, str | None]:
-#     try:
-#         r = requests.get(url, headers=HEADERS, timeout=10)
-#         print(f"[REQUESTS] {url} - {r.status_code}")
-#         print(f"[REQUESTS] {url} fetched with {len(r.text)} characters")
-#         return url, r.text
-#     except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
-#         print(f"[REQUESTS-TIMEOUT] {url}: {e}")
-#         return url, None
-#     except Exception as e:
-#         print(f"[REQUESTS-ERROR] {url}: {e}")
-#         return url, None
 
 PLAYWRIGHT_ENABLED = True  # circuit-breaker to avoid repeated failures
 
