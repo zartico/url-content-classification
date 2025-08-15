@@ -5,6 +5,8 @@ from config.project_config import PROJECT_ID, BQ_DATASET_ID, BQ_TABLE_ID
 from google.api_core.exceptions import NotFound
 import pandas as pd
 
+STAGING_INCOMING = f"{PROJECT_ID}.{BQ_DATASET_ID}.staging_categorized_incoming"
+FINAL_TABLE      = f"{PROJECT_ID}.{BQ_DATASET_ID}.{BQ_TABLE_ID}"
 
 def ensure_dataset_and_table_exist():
     """
@@ -48,56 +50,108 @@ def ensure_dataset_and_table_exist():
     
     return table_ref
 
-def load_data(df: pd.DataFrame): 
-    """ Load data into BigQuery using Spark BigQuery connector. """
+def _ensure_staging_exists(client: bigquery.Client, schema: list[bigquery.SchemaField]):
+    """
+    Create the fixed staging table if it doesn't exist.
+    We'll WRITE_TRUNCATE into it for each batch and DROP it after the MERGE.
+    """
+    try:
+        client.get_table(STAGING_INCOMING)
+    except NotFound:
+        client.create_table(bigquery.Table(STAGING_INCOMING, schema=schema))
+        print(f"[INFO] Created staging table {STAGING_INCOMING}.")
+
+def load_data(df: pd.DataFrame):
+    """
+    Simple, clean loader:
+      1) Ensure final table exists.
+      2) Filter to successful rows (content_topic + prediction_confidence).
+      3) Overwrite a fixed staging table with this batch.
+      4) MERGE into the final table:
+         - MATCHED: update topic/confidence if better; set last_accessed; DO NOT change view_count.
+         - NOT MATCHED: insert new row with view_count from payload (seeded from access_hits).
+      5) DROP the staging table to keep the dataset tidy.
+    """
     table_ref = ensure_dataset_and_table_exist()
-    if table_ref is None or df.empty:
+    if table_ref is None or df is None or df.empty:
         print("[LOAD] No data loaded (empty DataFrame or table missing).")
         return
-    
+
+    # Keep only successful categorizations
+    mask = df["content_topic"].notna() & df["prediction_confidence"].notna()
+    df_ok = df.loc[mask].copy()
+    if df_ok.empty:
+        print("[LOAD] No successful rows to load after filtering.")
+        return
+
+    # Enforce column order the MERGE expects
+    cols = [
+        "url_hash", "created_at", "trimmed_page_url", "site", "page_url",
+        "zartico_category", "content_topic", "prediction_confidence",
+        "review_flag", "nlp_raw_categories", "client_id",
+        "last_accessed", "view_count",
+    ]
+    df_ok = df_ok[cols]
+
     client = bigquery.Client(project=PROJECT_ID)
-    job = client.load_table_from_dataframe(df, table_ref).result()
-    print(f"[INFO] Loaded {len(df)} rows to {BQ_TABLE_ID}")
 
+    # Staging schema mirrors final (subset/ordering is fine)
+    staging_schema = [
+        bigquery.SchemaField("url_hash", "STRING"),
+        bigquery.SchemaField("created_at", "TIMESTAMP"),
+        bigquery.SchemaField("trimmed_page_url", "STRING"),
+        bigquery.SchemaField("site", "STRING"),
+        bigquery.SchemaField("page_url", "STRING"),
+        bigquery.SchemaField("zartico_category", "STRING"),
+        bigquery.SchemaField("content_topic", "STRING"),
+        bigquery.SchemaField("prediction_confidence", "FLOAT64"),
+        bigquery.SchemaField("review_flag", "BOOLEAN"),
+        bigquery.SchemaField("nlp_raw_categories", "STRING"),
+        bigquery.SchemaField("client_id", "STRING"),
+        bigquery.SchemaField("last_accessed", "TIMESTAMP"),
+        bigquery.SchemaField("view_count", "INT64"),
+    ]
+    _ensure_staging_exists(client, staging_schema)
 
-# def load_data(df: DataFrame): # SPARK DEPRECATED
-#     """ Load data into BigQuery using Spark BigQuery connector. """
-#     table_ref = ensure_dataset_and_table_exist()
-#     if table_ref is None:
-#         return
+    # 1) Stage with WRITE_TRUNCATE
+    client.load_table_from_dataframe(
+        df_ok,
+        STAGING_INCOMING,
+        job_config=bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE"),
+    ).result()
+    print(f"[LOAD] Staged {len(df_ok)} rows to {STAGING_INCOMING} (WRITE_TRUNCATE)")
 
-#     # Enforce correct column order
-#     ordered_columns = [
-#         "url_hash", "created_at", "trimmed_page_url", "site", "page_url",
-#         "zartico_category", "content_topic", "prediction_confidence", "review_flag",
-#         "nlp_raw_categories", "client_id", "last_accessed", "view_count"
-#     ]
-#     df_reordered = df.select(*ordered_columns)
+    # 2) MERGE → final (no view_count change on updates)
+    merge_sql = f"""
+    MERGE `{FINAL_TABLE}` T
+    USING `{STAGING_INCOMING}` S
+    ON T.url_hash = S.url_hash
+    WHEN MATCHED THEN
+      UPDATE SET
+        T.content_topic         = IF(S.prediction_confidence > T.prediction_confidence, S.content_topic, T.content_topic),
+        T.prediction_confidence = GREATEST(IFNULL(T.prediction_confidence, 0), IFNULL(S.prediction_confidence, 0)),
+        T.review_flag           = IF(S.prediction_confidence > T.prediction_confidence, S.review_flag, T.review_flag),
+        T.nlp_raw_categories    = IF(S.prediction_confidence > T.prediction_confidence, S.nlp_raw_categories, T.nlp_raw_categories),
+        T.zartico_category      = IF(S.prediction_confidence > T.prediction_confidence, S.zartico_category, T.zartico_category),
+        T.last_accessed         = CURRENT_TIMESTAMP()
+        -- DO NOT modify T.view_count here; cached touches already incremented upstream
+    WHEN NOT MATCHED THEN
+      INSERT (url_hash, created_at, trimmed_page_url, site, page_url,
+              zartico_category, content_topic, prediction_confidence, review_flag,
+              nlp_raw_categories, client_id, last_accessed, view_count)
+      VALUES (S.url_hash, S.created_at, S.trimmed_page_url, S.site, S.page_url,
+              S.zartico_category, S.content_topic, S.prediction_confidence, S.review_flag,
+              S.nlp_raw_categories, S.client_id, CURRENT_TIMESTAMP(), S.view_count)
+    """
+    client.query(merge_sql).result()
+    print(f"[LOAD] MERGE -> {FINAL_TABLE} complete.")
 
-#     # Explicit casting if necessary
-#     df_casted = df_reordered.select(
-#         df_reordered.url_hash.cast("string"),
-#         df_reordered.created_at.cast("timestamp"),
-#         df_reordered.trimmed_page_url.cast("string"),
-#         df_reordered.site.cast("string"),
-#         df_reordered.page_url.cast("string"),
-#         df_reordered.zartico_category.cast("string"),
-#         df_reordered.content_topic.cast("string"),
-#         df_reordered.prediction_confidence.cast("double"),
-#         df_reordered.review_flag.cast("boolean"),
-#         df_reordered.nlp_raw_categories.cast("string"),
-#         df_reordered.client_id.cast("string"),
-#         df_reordered.last_accessed.cast("timestamp"),
-#         df_reordered.view_count.cast("integer")
-#     )
+    # 3) Drop the staging table to keep the dataset clean
+    try:
+        client.delete_table(STAGING_INCOMING, not_found_ok=True)
+        print(f"[LOAD] Dropped staging table {STAGING_INCOMING}")
+    except Exception as e:
+        # Non-fatal; table will be overwritten next run anyway
+        print(f"[WARN] Failed to drop staging table {STAGING_INCOMING}: {e}")
 
-#     # Write to BigQuery
-#     df_casted.write \
-#         .format("bigquery") \
-#         .option("table", f"{PROJECT_ID}.{BQ_DATASET_ID}.{BQ_TABLE_ID}") \
-#         .option("writeMethod", "direct") \
-#         .mode("append") \
-#         .save()
-
-#     print(f"[INFO] Loaded {df_casted.count()} rows to {BQ_TABLE_ID}")
 

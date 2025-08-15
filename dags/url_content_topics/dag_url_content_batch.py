@@ -1,12 +1,8 @@
-from airflow.decorators import dag, task
+from airflow.decorators import dag, task, task_group
 from airflow.utils.dates import days_ago
 from airflow.utils.trigger_rule import TriggerRule
 from airflow.models import Variable
 
-
-from pyspark.sql.functions import monotonically_increasing_id, floor, col, lit
-from pyspark.sql.types import StringType
-from pyspark.sql.functions import udf
 from pyspark.sql import functions as F
 from pyspark.sql import types as T
 from pyspark.sql.window import Window
@@ -34,9 +30,7 @@ from utils.web_fetch import fetch_all_pages, extract_visible_text
 from src.categorize import categorize_urls
 from src.load import load_data
 
-BATCH_SIZE = 500
-TOTAL_URLS = 10000
-NUM_BATCHES_TARGET = 1000
+NUM_BATCHES_TARGET = 700
 
 # Use the GCS bucket configured in Airflow Variables
 TEMP_BUCKET = Variable.get("TEMP_GCS_BUCKET")  # e.g. non-codecs-prod-airflow/data/tmp/spark_staging
@@ -80,18 +74,17 @@ def create_spark_session():
     max_active_runs=1,
 )
 def url_content_backfill():
-    @task(task_id="make_run_id", retries=0, retry_delay=timedelta(minutes=0))
+    @task(task_id="make_run_id", retries=3, retry_delay=timedelta(minutes=3))
     def make_run_id() -> str:
         # Stable id for this DAG run (readable + unique)
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         return f"{ts}_{uuid.uuid4().hex[:8]}"
 
-    @task(task_id="extract_data", retries=0, retry_delay=timedelta(minutes=0), pool = "spark")
+    @task(task_id="extract_data", retries=3, retry_delay=timedelta(minutes=3), pool = "spark")
     def extract():
         # Spark version for backfill
         print("[EXTRACT] Starting data extraction from BigQuery")
         spark = create_spark_session()
-        #raw_df = extract_data(spark, PROJECT_ID, GA4_DATASET_ID, GA4_TABLE_ID, TOTAL_URLS)
         raw_df = extract_data(spark, PROJECT_ID, GA4_DATASET_ID, GA4_TABLE_ID)
         temp_path = "/home/airflow/gcs/data/url_content_topics/tmp/raw.parquet"
         raw_df.write.mode("overwrite").parquet(temp_path)
@@ -99,7 +92,7 @@ def url_content_backfill():
         spark.stop()
         return temp_path
 
-    @task(task_id="transform_data", retries=0, retry_delay=timedelta(minutes=0), pool = "spark")
+    @task(task_id="transform_data", retries=3, retry_delay=timedelta(minutes=3), pool = "spark")
     def transform(raw_path):
         # Spark version for backfill
         print("[TRANSFORM] Starting data transformation")
@@ -114,14 +107,14 @@ def url_content_backfill():
         return temp_path
 
 
-    @task(task_id="filter_urls", retries=0, retry_delay=timedelta(minutes=0), pool = "spark")
+    @task(task_id="filter_urls", retries=3, retry_delay=timedelta(minutes=3), pool = "spark")
     def filter_cached_urls(transformed_path, run_id: str):
         # Spark version for backfill
         print("[FILTER] Start filtering cached URLs")
         spark = create_spark_session()
         df = spark.read.parquet(transformed_path)
+
         print(f"[FILTER] Loaded from transformed data with {df.count()} rows")
-        #uncached_df = filter_cache_spark(spark, df)
         uncached_df = filter_cache_spark(
             spark, df,
             run_id=run_id,
@@ -129,13 +122,14 @@ def url_content_backfill():
             staging_table=f"{PROJECT_ID}.{BQ_DATASET_ID}.staging_url_info",
             temp_gcs_bucket=TEMP_BUCKET
         )
+
         print(f"[FILTER] Filtered cached URLs, remaining {uncached_df.count()} uncached rows")
         temp_path = "/home/airflow/gcs/data/url_content_topics/tmp/uncached.parquet"
         uncached_df.write.mode("overwrite").parquet(temp_path)
         spark.stop()
         return temp_path
     
-    @task(task_id="stage_batches_bq", retries=0, pool="spark")
+    @task(task_id="stage_batches_bq", retries=3, retry_delay=timedelta(minutes=3), pool="spark")
     def stage_batches_to_bq(uncached_parquet_path: str, num_batches_target: int, run_id: str) -> list[str]:
         """
         1) Read uncached parquet (must include: url_hash, trimmed_page_url, site, page_url, client_id, access_hits).
@@ -221,79 +215,130 @@ def url_content_backfill():
         batch_ids = [r["batch_id"] for r in q.result()]
         print(f"[STAGE] Created {len(batch_ids)} batches for run_id={run_id}")
 
-        # Optional: drop temp table to keep dataset clean
+        # Drop temp table to keep dataset clean
         client.query(f"DROP TABLE `{tmp_table}`").result()
         print(f"[STAGE] Dropped temp table {tmp_table}")
 
         spark.stop()
         return batch_ids
 
-    @task(task_id="fetch_urls", retries=3, retry_delay=timedelta(minutes=3), max_active_tis_per_dag=8, pool = "fetch")
-    def fetch_urls(batch_id: str):
-        print("[FETCH] Fetching URLs in batch")
-        client = bigquery.Client()
-        staging_table = f"{PROJECT_ID}.{BQ_DATASET_ID}.staging_url_info"
-        df = client.query(f"""
-            SELECT * FROM `{staging_table}` WHERE batch_id = '{batch_id}'
-        """).to_dataframe()
+    @task_group(group_id="process_batch")
+    def process_batch_group(batch_id: str):
+        """
+        Per-batch sub-DAG: fetch -> categorize -> load
+        Using a TaskGroup lets batches complete independently under resource pressure.
+        """
 
-        urls = df["page_url"].tolist()
-        page_texts = asyncio.run(fetch_all_pages(urls, max_concurrent=60, limit_per_host=2))
+        @task(task_id="fetch_urls", 
+              retries=3, 
+              retry_delay=timedelta(minutes=3),
+              max_active_tis_per_dag=30, 
+              pool="fetch")
+        def fetch_urls(batch_id: str) -> str:
+            print("[FETCH] Fetching URLs in batch")
+            client = bigquery.Client()
+            staging_table = f"{PROJECT_ID}.{BQ_DATASET_ID}.staging_url_info"
 
-        df["page_text"] = df["page_url"].apply(
-            lambda url: extract_visible_text(page_texts.get(url, ""))
-        )
-        # Overwrite existing rows for this batch
-        job_config = bigquery.LoadJobConfig(
-        write_disposition="WRITE_TRUNCATE",
-        schema_update_options=["ALLOW_FIELD_ADDITION"],
-        )
+            # Read this batch
+            df = client.query(
+                f"""
+                    SELECT batch_id, url_hash, page_url
+                    FROM `{staging_table}`
+                    WHERE batch_id = @batch_id
+                    """,
+                    job_config=bigquery.QueryJobConfig(
+                        query_parameters=[bigquery.ScalarQueryParameter("batch_id", "STRING", batch_id)]
+                    )
+            ).to_dataframe()
 
-        # Limit scope to this batch
-        temp_table = f"{staging_table}_temp_{batch_id.replace('-', '_')}"
+            if df.empty:
+                print(f"[FETCH] No rows for batch_id={batch_id}")
+                return batch_id
 
-        print("[FETCH] Fetched page text for URLs")
+            # Fetch HTML/text (adjust concurrency as needed)
+            page_texts = asyncio.run(
+                fetch_all_pages(
+                    df["page_url"].tolist(),
+                    max_concurrent=8,
+                    limit_per_host=2,
+                )
+            )
+            # Parse HTML to visible text
+            df["page_text"] = df["page_url"].apply(lambda u: extract_visible_text(page_texts.get(u, "")))
 
-        client.load_table_from_dataframe(df, staging_table).result()
-        return batch_id 
+            # Write to per-batch temp table then MERGE into staging
+            tmp_table = f"{PROJECT_ID}.{BQ_DATASET_ID}.tmp_fetch_{batch_id.replace('-', '_')}"
+            payload = df[["batch_id", "url_hash", "page_url", "page_text"]]
 
-    @task(task_id="categorize_urls", retries=3, retry_delay=timedelta(minutes=3), max_active_tis_per_dag=14, pool = "nlp", trigger_rule=TriggerRule.ALL_DONE)
-    def categorize(batch_id: str):
-        print("[CATEGORIZE] Starting URL categorization")
-        #df_page_text = pd.DataFrame(batch_with_texts)
-        client = bigquery.Client()
-        table_id = f"{PROJECT_ID}.{BQ_DATASET_ID}.staging_url_info"
-        df = client.query(f"""
-            SELECT * FROM `{table_id}`
-            WHERE batch_id = '{batch_id}' AND page_text IS NOT NULL
-        """).to_dataframe()
+            client.load_table_from_dataframe(payload, tmp_table).result()
+            print(f"[FETCH] Wrote {len(payload)} rows to {tmp_table}")
 
-        if df.empty:
-            print(f"[CATEGORIZE] No page_text for batch_id={batch_id}; skipping.")
-            return []
+            merge_sql = f"""
+            MERGE `{staging_table}` T
+            USING `{tmp_table}` S
+            ON T.batch_id = S.batch_id AND T.url_hash = S.url_hash
+            WHEN MATCHED THEN
+            UPDATE SET
+                T.page_text = S.page_text
+            """
+            client.query(merge_sql).result()
+            client.query(f"DROP TABLE `{tmp_table}`").result()
+            print(f"[FETCH] MERGE complete for batch_id={batch_id}")
+            return batch_id
 
-        categorized_df = categorize_urls(df)
-        print(f"[CATEGORIZE] Categorized {len(categorized_df)} URLs")
-        return categorized_df.to_dict(orient="records")
+        @task(task_id="categorize_urls", 
+              retries=3, 
+              retry_delay=timedelta(minutes=3),
+              max_active_tis_per_dag=14, 
+              pool="nlp",
+              trigger_rule=TriggerRule.ALL_DONE)
+        def categorize(batch_id: str):
+            print("[CATEGORIZE] Starting URL categorization")
+            client = bigquery.Client()
+            table_id = f"{PROJECT_ID}.{BQ_DATASET_ID}.staging_url_info"
+
+            df = client.query(
+                f"""
+                SELECT *
+                FROM `{table_id}`
+                WHERE batch_id = @batch_id AND page_text IS NOT NULL
+                """,
+                job_config=bigquery.QueryJobConfig(
+                    query_parameters=[bigquery.ScalarQueryParameter("batch_id", "STRING", batch_id)]
+                )
+            ).to_dataframe()
+
+            if df.empty:
+                print(f"[CATEGORIZE] No page_text for batch_id={batch_id}; skipping.")
+                return []
+
+            categorized_df = categorize_urls(df) 
+            print(f"[CATEGORIZE] Categorized {len(categorized_df)} URLs in batch_id={batch_id}")
+            return categorized_df.to_dict(orient="records")
+
+        @task(task_id="load_data", retries=3, retry_delay=timedelta(minutes=3))
+        def load(batch_rows):
+            print("[LOAD] Loading categorized data into BigQuery")
+            if not batch_rows:
+                print("[LOAD] No data to load.")
+                return "Skipped"
+            
+            df = pd.DataFrame(batch_rows)
+            df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce")
+            df["last_accessed"] = pd.to_datetime(df["last_accessed"], errors="coerce")
+
+            load_data(df)
+            print("[LOAD] Data loaded successfully")
+            return "Loaded"
+
+        fetched = fetch_urls(batch_id)
+        categorized = categorize(batch_id)
+        # Categorize waits for corresponding fetch to complete
+        fetched >> categorized
+        load(categorized)
 
 
-    @task(task_id="load_data", retries=0, retry_delay=timedelta(minutes=0))
-    def load(batch_rows):
-        print("[LOAD] Loading categorized data into BigQuery")
-
-        if not batch_rows:
-            print("[LOAD] No data to load.")
-            return "Skipped"
-        
-        df = pd.DataFrame(batch_rows)
-        # Convert string timestamps back to datetime for BigQuery
-        df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce")
-        df["last_accessed"] = pd.to_datetime(df["last_accessed"], errors="coerce")
-
-        load_data(df)
-        print("[LOAD] Data loaded successfully")
-        return "Loaded"
-
+    # Main DAG flow
     run_id = make_run_id()
     raw_path = extract()
     transformed_path = transform(raw_path)
@@ -305,11 +350,8 @@ def url_content_backfill():
         run_id=run_id,
     )
 
-    fetched = fetch_urls.expand(batch_id=batch_ids)
-    categorized = categorize.expand(batch_id=batch_ids)
-    # Categorize waits for corresponding fetch to complete
-    fetched >> categorized
-    load.expand(batch_rows=categorized)
+    # Each mapped group will run independently: fetch -> categorize -> load
+    process_batch_group.expand(batch_id=batch_ids)
 
 url_content_backfill()
 

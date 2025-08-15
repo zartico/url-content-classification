@@ -2,13 +2,23 @@ from config.project_config import PROJECT_ID, BQ_DATASET_ID, BQ_TABLE_ID
 from utils.cache import hash_url, get_result_columns
 from utils.category_mapping import map_to_zartico_category
 from utils.utils import is_homepage
+
 from google.cloud import language_v1, bigquery
 from google.api_core.retry import Retry, if_exception_type
 from google.api_core import exceptions
+
 from bs4 import BeautifulSoup
 from datetime import datetime, timezone
 import pandas as pd
 import random, time
+from time import monotonic as _monotonic
+
+# -----------------------------
+# Tunables for Throttling and Retries
+# -----------------------------
+RPS_PER_TASK = 5.0                # ~5 requests/second per categorize task
+JITTER_FRACTION = 0.10            # +/-10% jitter on pacing sleeps
+POST_CALL_JITTER_MAX_SEC = 0.05   # up to 50ms small jitter after each call
 
 RETRY = Retry(
     predicate=if_exception_type(
@@ -22,6 +32,33 @@ RETRY = Retry(
     deadline=60.0,
 )
 
+class _RateLimiter:
+    """
+    Simple tokenless rate limiter: enforces ~RPS by spacing calls at ~interval seconds.
+    Adds small jitter so many tasks don't align on the same boundaries.
+    """
+    def __init__(self, rps: float, jitter_fraction: float = 0.10):
+        if rps <= 0:
+            raise ValueError("rps must be > 0")
+        self.interval = 1.0 / rps
+        self.jitter_fraction = max(0.0, jitter_fraction)
+        self._next = _monotonic()
+
+    def acquire(self):
+        now = _monotonic()
+        # If we're early, sleep the remaining time (+/- jitter)
+        if now < self._next:
+            remaining = self._next - now
+            # jitter in [-j, +j] where j = remaining * jitter_fraction
+            j = remaining * self.jitter_fraction
+            sleep_for = max(0.0, remaining + random.uniform(-j, j))
+            if sleep_for > 0:
+                time.sleep(sleep_for)
+            now = _monotonic()
+        # schedule next slot
+        self._next = max(self._next, now) + self.interval
+
+
 def classify_text(raw_html, client):
     """ Classify text using Google Cloud Natural Language API."""
 
@@ -31,7 +68,7 @@ def classify_text(raw_html, client):
         text = soup.get_text(separator=' ', strip=True)
 
         # tiny jitter to avoid lockstep bursts across mapped tasks
-        time.sleep(random.uniform(0, 0.2))
+        time.sleep(random.uniform(0, POST_CALL_JITTER_MAX_SEC))
 
         # Call Google NLP V2 API
         document = language_v1.Document(
@@ -49,7 +86,7 @@ def classify_text(raw_html, client):
         return response.categories
     except Exception as e:
         print(f"[ERROR] NLP classification failed: {e}")
-        return []
+        return None
     
 
 # Main categorization function
@@ -69,10 +106,11 @@ def categorize_urls(df):
         print("[DEBUG] Missing page_text, returning empty result.")
         return pd.DataFrame(columns=get_result_columns())
     
-    # Columns to be added to the DataFrame
-    zartico_categories, content_topics, confidences, review_flags, raw_categories = [], [], [], [], []
-    url_hashes, created_ats, last_accesseds, view_counts= [], [], [], []
-    processed_indexes = []
+    # Per-task limiter
+    limiter = _RateLimiter(RPS_PER_TASK, JITTER_FRACTION)
+
+    # Rows to be added to the DataFrame
+    rows = []
 
     for idx, row in df.iterrows():
         page_url = row["page_url"]
@@ -80,92 +118,82 @@ def categorize_urls(df):
         site = row["site"]
         page_text = row.get("page_text", "")
 
-        # Use existing url_hash if available, otherwise create it (for backward compatibility)
-        if "url_hash" in df.columns and pd.notna(row.get("url_hash")):
-            url_hash = row["url_hash"]
-        else:
+        # Skip if not enough text for NLP
+        if not page_text or len(str(page_text).split()) < 20:
+            print(f"[SKIP] {page_url} insufficient content.")
+            continue
+
+        # url_hash: prefer provided, else compute (back-compat)
+        url_hash = row.get("url_hash")
+        if pd.isna(url_hash) or url_hash is None:
             url_hash = hash_url(trimmed_url)
-        
+
+        # Respect per-task RPS before the API call
+        limiter.acquire()
+
+        categories = classify_text(page_text, nlp_client)
+        if categories is None:
+            # Hard failure (exception) → skip so it can be retried in future runs
+            print(f"[SKIP] {page_url} NLP error; skipping insert.")
+            continue
+        if not categories:
+            # No categories returned → treat as unsuccessful; skip so it retries later
+            print(f"[SKIP] {page_url} no categories; skipping insert.")
+            continue
+
+        # Top category + mapping
+        top_cat = categories[0]
+        if is_homepage(trimmed_url, site):
+            zartico_cat = "Navigation & Home Page"
+        else:
+            zartico_cat = map_to_zartico_category(top_cat.name)
+
+        # Seed view_count with access_hits if present; else 1
+        try:
+            vc = int(row.get("access_hits", 1))
+        except Exception:
+            vc = 1
+        vc = max(1, vc)
+
         now_ts = datetime.now(timezone.utc).isoformat()
 
-        # If no text or not long enough for NLP API, skip this URL
-        if not page_text or len(page_text.split()) < 20:
-            print(f"[SKIP] Skipping {page_url} due to missing or insufficient content.")
-            continue  # Skip this row entirely
+        rows.append({
+            "url_hash": url_hash,
+            "created_at": now_ts,
+            "trimmed_page_url": trimmed_url,
+            "site": site,
+            "page_url": page_url,
+            "content_topic": top_cat.name,
+            "prediction_confidence": top_cat.confidence,
+            "review_flag": top_cat.confidence < 0.6,
+            "nlp_raw_categories": str([{"name": c.name, "confidence": c.confidence} for c in categories]),
+            "client_id": row["client_id"] if "client_id" in df.columns else None,
+            "last_accessed": now_ts,
+            "view_count": vc,
+            "zartico_category": zartico_cat,
+        })
 
-        processed_indexes.append(idx)
-        url_hashes.append(url_hash)
-        created_ats.append(now_ts)
-        last_accesseds.append(now_ts)
-        
-        try: # Classify the text using NLP
-            categories = classify_text(page_text, nlp_client)
-            print(f"[DEBUG] Categories returned for {page_url}: {categories}")
-            if categories:
-                top_cat = categories[0]
+        # small post-call jitter
+        if POST_CALL_JITTER_MAX_SEC > 0:
+            time.sleep(random.uniform(0, POST_CALL_JITTER_MAX_SEC))
 
-                # Site is a homepage
-                if is_homepage(trimmed_url, df["site"][idx]):
-                    zartico_categories.append("Navigation & Home Page")
-                else:
-                    zartico_categories.append(map_to_zartico_category(top_cat.name))
-
-                content_topics.append(top_cat.name)
-                confidences.append(top_cat.confidence)
-                review_flags.append(top_cat.confidence < 0.6)
-                raw_categories.append(str([{"name": c.name, "confidence": c.confidence} for c in categories]))
-
-            else: # No categories found
-                zartico_categories.append(None)
-                content_topics.append(None)
-                confidences.append(None)
-                review_flags.append(True)
-                raw_categories.append(None)
-
-            view_counts.append(1)
-
-        except Exception as e:
-            print(f"[ERROR] NLP failed for {page_url}: {e}")
-            zartico_categories.append(None)
-            content_topics.append(None)
-            confidences.append(None)
-            review_flags.append(True)
-            raw_categories.append(None)
-            view_counts.append(1)
-
-    # If no new rows remain, return empty DataFrame with correct columns
-    if not processed_indexes or len(df) == 0:
+    if not rows:
+        print("[DEBUG] No successful categorizations this batch.")
         return pd.DataFrame(columns=get_result_columns())
 
-    # Debug
-    print("[DEBUG] DataFrame length:", len(df))
-    print("[DEBUG] url_hashes:", len(url_hashes))
-    print("[DEBUG] created_ats:", len(created_ats))
-    print("[DEBUG] zartico_categories:", len(zartico_categories))
-    print("[DEBUG] content_topics:", len(content_topics))
-    print("[DEBUG] confidences:", len(confidences))
-    print("[DEBUG] review_flags:", len(review_flags))
-    print("[DEBUG] raw_categories:", len(raw_categories))
-    print("[DEBUG] last_accesseds:", len(last_accesseds))
-    print("[DEBUG] view_counts:", len(view_counts))
+    result_df = pd.DataFrame(rows, columns=get_result_columns())
 
-
-    # Create a Pandas DataFrame with the new URL results
-    result_df = pd.DataFrame({
-        "url_hash": url_hashes,
-        "created_at": created_ats,
-        "trimmed_page_url": [df["trimmed_page_url"].iloc[i] for i in processed_indexes],
-        "site": [df["site"].iloc[i] for i in processed_indexes],
-        "page_url": [df["page_url"].iloc[i] for i in processed_indexes],
-        "content_topic": content_topics,
-        "prediction_confidence": confidences,
-        "review_flag": review_flags,
-        "nlp_raw_categories": raw_categories,
-        "client_id": [df["client_id"].iloc[i] for i in processed_indexes] if "client_id" in df.columns else [None]*len(processed_indexes),
-        "last_accessed": last_accesseds,
-        "view_count": view_counts,
-        "zartico_category": zartico_categories,
-    })
+    # Debug summary
+    print("[DEBUG] Categorization summary:")
+    print("  total_input_rows:", len(df))
+    print("  successful_rows:", len(result_df))
+    print("  url_hashes:", result_df["url_hash"].nunique())
+    print("  content_topics:", result_df["content_topic"].notna().sum())
+    print("  zartico_categories:", result_df["zartico_category"].notna().sum())
+    print("  confidences_nonnull:", result_df["prediction_confidence"].notna().sum())
+    print("  avg_confidence:", result_df["prediction_confidence"].mean())
+    print("  review_flags_true:", result_df["review_flag"].sum())
+    print("  view_count_total:", result_df["view_count"].sum())
 
     return result_df
 
