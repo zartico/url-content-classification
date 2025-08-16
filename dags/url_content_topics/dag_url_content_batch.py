@@ -94,7 +94,7 @@ def url_content_backfill():
         if max_hits_row:
             top = max_hits_row[0]
             print(f"[EXTRACT] Highest access_hits: {top['access_hits']} "
-                f"for url_hash={top['url_hash']} (site={top['site']}, page_url={top['page_url']})")
+                f"for url_hash={top['url_hash']} (site={top['site']}, trimmed_page_url={top['trimmed_page_url']})")
 
         spark.stop()
         return temp_path
@@ -115,7 +115,7 @@ def url_content_backfill():
         if max_hits_row:
             top = max_hits_row[0]
             print(f"[TRANSFORM] Highest access_hits: {top['access_hits']} "
-                f"for url_hash={top['url_hash']} (site={top['site']}, page_url={top['page_url']})")
+                f"for url_hash={top['url_hash']} (site={top['site']}, trimmed_page_url={top['trimmed_page_url']})")
 
         spark.stop()
         return temp_path
