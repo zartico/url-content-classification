@@ -82,19 +82,25 @@ def url_content_backfill():
 
     @task(task_id="extract_data", retries=3, retry_delay=timedelta(minutes=3), pool = "spark")
     def extract():
-        # Spark version for backfill
         print("[EXTRACT] Starting data extraction from BigQuery")
         spark = create_spark_session()
+        # Add date filter for after backfill
         raw_df = extract_data(spark, PROJECT_ID, GA4_DATASET_ID, GA4_TABLE_ID)
         temp_path = "/home/airflow/gcs/data/url_content_topics/tmp/raw.parquet"
         raw_df.write.mode("overwrite").parquet(temp_path)
-        print(f"[EXTRACT] Extracted {raw_df.count()} rows from BigQuery")
+        print(f"[EXTRACT] Extracted {raw_df.count()} distinct from BigQuery")
+        # Sanity check
+        max_hits_row = raw_df.orderBy(F.col("access_hits").desc()).limit(1).collect()
+        if max_hits_row:
+            top = max_hits_row[0]
+            print(f"[EXTRACT] Highest access_hits: {top['access_hits']} "
+                f"for url_hash={top['url_hash']} (site={top['site']}, page_url={top['page_url']})")
+
         spark.stop()
         return temp_path
 
     @task(task_id="transform_data", retries=3, retry_delay=timedelta(minutes=3), pool = "spark")
     def transform(raw_path):
-        # Spark version for backfill
         print("[TRANSFORM] Starting data transformation")
         spark = create_spark_session()
         raw_df = spark.read.parquet(raw_path)
@@ -103,13 +109,20 @@ def url_content_backfill():
         print(f"[TRANSFORM] Transformed/Cleaned {transformed_df.count()} rows")
         temp_path = "/home/airflow/gcs/data/url_content_topics/tmp/transformed.parquet"
         transformed_df.write.mode("overwrite").parquet(temp_path)
+
+        # Sanity check
+        max_hits_row = transformed_df.orderBy(F.col("access_hits").desc()).limit(1).collect()
+        if max_hits_row:
+            top = max_hits_row[0]
+            print(f"[TRANSFORM] Highest access_hits: {top['access_hits']} "
+                f"for url_hash={top['url_hash']} (site={top['site']}, page_url={top['page_url']})")
+
         spark.stop()
         return temp_path
 
 
     @task(task_id="filter_urls", retries=3, retry_delay=timedelta(minutes=3), pool = "spark")
     def filter_cached_urls(transformed_path, run_id: str):
-        # Spark version for backfill
         print("[FILTER] Start filtering cached URLs")
         spark = create_spark_session()
         df = spark.read.parquet(transformed_path)
