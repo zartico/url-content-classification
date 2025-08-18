@@ -308,6 +308,7 @@ def url_content_backfill():
         @task(task_id="categorize_urls", 
               retries=3, 
               retry_delay=timedelta(minutes=3),
+              execution_timeout=timedelta(minutes=40),
               max_active_tis_per_dag=14, 
               pool="nlp",
               trigger_rule=TriggerRule.ALL_DONE)

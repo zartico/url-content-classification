@@ -162,23 +162,23 @@ def fetch_requests(url: str) -> tuple[str, str | None]:
         r = requests.get(url, headers=HEADERS, timeout=(5, 15), allow_redirects=True)
         status = r.status_code
 
-        if status in (404, 410):
+        if status in (401, 404, 410):
             print(f"[REQUESTS] {url} - {status} (terminal skip)")
             return url, f"[SKIP:{status}]"
 
-        if status in (401, 403):
-            txt = r.text
-            if _should_skip_blocked(txt[:16000], len(txt)):
-                print(f"[REQUESTS] {url} - {status} (blocked; skip)")
-                return url, "[SKIP:403_BLOCKED]"
-            print(f"[REQUESTS] {url} - {status} (keeping {len(txt)} chars)")
-            return url, txt
+        # if status in (401, 403):
+        #     txt = r.text
+        #     if _should_skip_blocked(txt[:16000], len(txt)):
+        #         print(f"[REQUESTS] {url} - {status} (blocked; skip)")
+        #         return url, "[SKIP:403_BLOCKED]"
+        #     print(f"[REQUESTS] {url} - {status} (keeping {len(txt)} chars)")
+        #     return url, txt
 
         if 200 <= status < 300:
             print(f"[REQUESTS] {url} - {status} ({len(r.text)} chars)")
             return url, r.text
 
-        if status == 429 or 500 <= status < 600:
+        if status in (403, 429) or 500 <= status < 600:
             # one gentle retry so we don't block the event loop too long
             delay = _backoff_delay(0)
             print(f"[REQUESTS-RETRY] {url} - {status}; sleeping {delay:.2f}s")
