@@ -129,8 +129,7 @@ def _merge_touches_with_counts(client: bigquery.Client, touches_table: str):
     ON T.url_hash = S.url_hash
     WHEN MATCHED THEN
       UPDATE SET
-        T.last_accessed = CURRENT_TIMESTAMP(),
-        T.view_count = IFNULL(T.view_count, 0) + S.dup_hits
+        T.last_accessed = CURRENT_TIMESTAMP()
     """
     client.query(merge_sql).result()
 
@@ -138,9 +137,6 @@ def _merge_touches_with_counts(client: bigquery.Client, touches_table: str):
     client.query(f"DROP TABLE `{touches_table}`").result()
     print(f"[FILTER] Touch MERGE complete and dropped {touches_table}")
 
-# -----------------------
-# Spark (scalable) path
-# -----------------------
 
 def filter_cache_spark(
     spark,
@@ -162,7 +158,7 @@ def filter_cache_spark(
 
     Returns: Spark DF with columns from the input (+ access_hits), one row per uncached url_hash.
     """
-    # 1) url_hash must exist (we compute it in transform)
+    # Require url_hash
     if "url_hash" not in df.columns:
         raise ValueError("[FILTER] Expected 'url_hash' to exist. Compute it in transform first.")
 
@@ -199,11 +195,10 @@ def filter_cache_spark(
         client = bigquery.Client(project=PROJECT_ID)
         _merge_touches_with_counts(client, touches_table)
 
-    # For uncached: pick a deterministic representative row and carry access_hits forward
+    # Uncached
     rep = (
         df_uncached
         .withColumn("url_len", F.length(col("page_url")))
-        .withColumn("access_hits", col("dup_hits"))
         .withColumn(
             "rn",
             F.row_number().over(

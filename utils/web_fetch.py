@@ -33,7 +33,13 @@ _INSTALL_SENTINEL = Path(BROWSERS_PATH) / ".chromium_installed"
 _INSTALL_LOCK = Path(BROWSERS_PATH) / ".install.lock"
 
 _MAX_AIOHTTP_RETRIES = 2  # total tries = first + 2 retries on 429/5xx/timeout
-_AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=20, connect=5, sock_connect=5, sock_read=15)
+_AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(
+    total=45,       # full request budget
+    connect=10,     # TCP connect budget
+    sock_connect=10,
+    sock_read=20,   # per-read budget
+)
+_DNS_TTL_SECS = 300
 
 def ensure_playwright_browsers_installed() -> bool:
     """
@@ -78,7 +84,7 @@ async def fetch_aiohttp(session, url: str) -> tuple[str, str | None]:
     attempt = 0
     while True:
         try:
-            async with session.get(url, headers=HEADERS, timeout=_AIOHTTP_TIMEOUT) as resp:
+            async with session.get(url, allow_redirects=True) as resp:
                 status = resp.status
 
                 # Fast terminal skips (no body read, no retries)
@@ -284,14 +290,14 @@ async def fetch_all_pages(urls: list[str], max_concurrent: int, limit_per_host: 
     results = {}
 
     semaphore = asyncio.Semaphore(max_concurrent)
-    connector = aiohttp.TCPConnector(limit=max_concurrent, limit_per_host=limit_per_host, ttl_dns_cache=300)
+    connector = aiohttp.TCPConnector(limit=max_concurrent, limit_per_host=limit_per_host, ttl_dns_cache=_DNS_TTL_SECS)
 
     async def fetch_with_semaphore(session, url):
         async with semaphore:
             return await fetch_aiohttp(session, url)
     
     try:
-        async with aiohttp.ClientSession(connector=connector) as session:
+        async with aiohttp.ClientSession(connector=connector, timeout=_AIOHTTP_TIMEOUT, headers=HEADERS, trust_env=False) as session:
             aio_tasks = [fetch_with_semaphore(session, url) for url in urls]
             aio_results = await asyncio.gather(*aio_tasks, return_exceptions=True)
 

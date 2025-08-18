@@ -1,9 +1,12 @@
 from pyspark.sql import DataFrame
 from pyspark.sql.types import *
 from google.cloud import bigquery
-from config.project_config import PROJECT_ID, BQ_DATASET_ID, BQ_TABLE_ID
+from google.cloud.bigquery import ArrayQueryParameter
+from config.project_config import PROJECT_ID, BQ_DATASET_ID, BQ_TABLE_ID, GA4_DATASET_ID, GA4_TABLE_ID
 from google.api_core.exceptions import NotFound
+
 import pandas as pd
+import os
 
 STAGING_INCOMING = f"{PROJECT_ID}.{BQ_DATASET_ID}.staging_categorized_incoming"
 FINAL_TABLE      = f"{PROJECT_ID}.{BQ_DATASET_ID}.{BQ_TABLE_ID}"
@@ -61,7 +64,52 @@ def _ensure_staging_exists(client: bigquery.Client, schema: list[bigquery.Schema
         client.create_table(bigquery.Table(STAGING_INCOMING, schema=schema))
         print(f"[INFO] Created staging table {STAGING_INCOMING}.")
 
-def load_data(df: pd.DataFrame):
+def _iter_chunks(seq, size):
+    for i in range(0, len(seq), size):
+        yield seq[i:i+size]
+
+def _reconcile_lifetime_view_counts_for_hashes(client: bigquery.Client, hashes: list[str], chunk_size: int = 5000):
+    """
+    Idempotent: for the provided url_hashes only, set FINAL.view_count to lifetime GA4 hits.
+    Meant to be called from load_data() when skip_reconcile=False.
+    """
+    if not hashes:
+        return
+    total = 0
+    for chunk in _iter_chunks(hashes, chunk_size):
+        sql = f"""
+        WITH target_hashes AS (
+          SELECT url_hash FROM UNNEST(@hashes) AS url_hash
+        ),
+        lifetime AS (
+          SELECT
+            TO_HEX(SHA256(CAST(LOWER(TRIM(trimmed_page_url)) AS STRING))) AS url_hash,
+            COUNT(*) AS lifetime_hits
+          FROM `{PROJECT_ID}.{GA4_DATASET_ID}.{GA4_TABLE_ID}`
+          WHERE trimmed_page_url IS NOT NULL
+            AND site IS NOT NULL
+            AND client_id NOT LIKE '%Demo%'
+            AND TO_HEX(SHA256(CAST(LOWER(TRIM(trimmed_page_url)) AS STRING))) IN (SELECT url_hash FROM target_hashes)
+          GROUP BY url_hash
+        )
+        MERGE `{FINAL_TABLE}` T
+        USING lifetime L
+        ON T.url_hash = L.url_hash
+        WHEN MATCHED THEN UPDATE SET
+          T.view_count    = L.lifetime_hits,
+          T.last_accessed = CURRENT_TIMESTAMP()
+        """
+        job = client.query(
+            sql,
+            job_config=bigquery.QueryJobConfig(
+                query_parameters=[ArrayQueryParameter("hashes", "STRING", chunk)]
+            ),
+        )
+        job.result()
+        total += len(chunk)
+    print(f"[LOAD] Lifetime view_count reconciled for {total} urls.")
+
+def load_data(df: pd.DataFrame, *, skip_reconcile: bool = False):
     """
     Simple, clean loader:
       1) Ensure final table exists.
@@ -134,7 +182,6 @@ def load_data(df: pd.DataFrame):
         T.nlp_raw_categories    = IF(S.prediction_confidence > T.prediction_confidence, S.nlp_raw_categories, T.nlp_raw_categories),
         T.zartico_category      = IF(S.prediction_confidence > T.prediction_confidence, S.zartico_category, T.zartico_category),
         T.last_accessed         = CURRENT_TIMESTAMP()
-        -- DO NOT modify T.view_count here; cached touches already incremented upstream
     WHEN NOT MATCHED THEN
       INSERT (url_hash, created_at, trimmed_page_url, site, page_url,
               zartico_category, content_topic, prediction_confidence, review_flag,
@@ -146,7 +193,14 @@ def load_data(df: pd.DataFrame):
     client.query(merge_sql).result()
     print(f"[LOAD] MERGE -> {FINAL_TABLE} complete.")
 
-    # 3) Drop the staging table to keep the dataset clean
+    # 3) Optional reconcile: set FINAL.view_count to *lifetime* GA4 hits for this batch
+    hashes = df_ok["url_hash"].dropna().unique().tolist()
+    if skip_reconcile:
+        print("[LOAD] Skipping lifetime reconcile (skip_reconcile=True).")
+    else:
+        _reconcile_lifetime_view_counts_for_hashes(client, hashes)
+
+    # 4) Drop the staging table to keep the dataset clean
     try:
         client.delete_table(STAGING_INCOMING, not_found_ok=True)
         print(f"[LOAD] Dropped staging table {STAGING_INCOMING}")

@@ -30,10 +30,13 @@ from utils.web_fetch import fetch_all_pages, extract_visible_text
 from src.categorize import categorize_urls
 from src.load import load_data
 
-NUM_BATCHES_TARGET = 700
+NUM_BATCHES_TARGET = 2000
 
 # Use the GCS bucket configured in Airflow Variables
 TEMP_BUCKET = Variable.get("TEMP_GCS_BUCKET")  # e.g. non-codecs-prod-airflow/data/tmp/spark_staging
+URL_CONTENT_SKIP_RECONCILE = Variable.get("URL_CONTENT_SKIP_RECONCILE", default_var = "0") # lifetime view_count from GA4 table
+SKIP_RECONCILE_BOOL = (URL_CONTENT_SKIP_RECONCILE == "1")
+
 
 def create_spark_session():
     from pyspark.sql import SparkSession
@@ -166,7 +169,7 @@ def url_content_backfill():
             from math import ceil
             batch_size = max(1, int(ceil(uncached_count / num_batches_target)))
             print(f"[STAGE] Dynamic: uncached={uncached_count}, target_batches={num_batches_target} -> batch_size={batch_size}")
-        elif not batch_size:
+        else:
             raise ValueError("[STAGE] Provide either batch_size or num_batches_target")
 
         # Deterministic row numbers → batch_index
@@ -210,6 +213,8 @@ def url_content_backfill():
         MERGE `{staging_table}` T
         USING `{tmp_table}` S
         ON T.run_id = S.run_id AND T.url_hash = S.url_hash
+        WHEN MATCHED THEN
+        UPDATE SET T.access_hits = S.access_hits
         WHEN NOT MATCHED THEN
         INSERT (url_hash, trimmed_page_url, site, page_url, client_id, access_hits, run_id, batch_id)
         VALUES (S.url_hash, S.trimmed_page_url, S.site, S.page_url, S.client_id, S.access_hits, S.run_id, S.batch_id)
@@ -245,7 +250,8 @@ def url_content_backfill():
         @task(task_id="fetch_urls", 
               retries=3, 
               retry_delay=timedelta(minutes=3),
-              max_active_tis_per_dag=30, 
+              execution_timeout=timedelta(minutes=60),
+              max_active_tis_per_dag=10, 
               pool="fetch")
         def fetch_urls(batch_id: str) -> str:
             print("[FETCH] Fetching URLs in batch")
@@ -330,7 +336,7 @@ def url_content_backfill():
             return categorized_df.to_dict(orient="records")
 
         @task(task_id="load_data", retries=3, retry_delay=timedelta(minutes=3))
-        def load(batch_rows):
+        def load(batch_rows, skip_reconcile: bool):
             print("[LOAD] Loading categorized data into BigQuery")
             if not batch_rows:
                 print("[LOAD] No data to load.")
@@ -340,7 +346,7 @@ def url_content_backfill():
             df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce")
             df["last_accessed"] = pd.to_datetime(df["last_accessed"], errors="coerce")
 
-            load_data(df)
+            load_data(df, skip_reconcile=skip_reconcile)
             print("[LOAD] Data loaded successfully")
             return "Loaded"
 
@@ -348,7 +354,7 @@ def url_content_backfill():
         categorized = categorize(batch_id)
         # Categorize waits for corresponding fetch to complete
         fetched >> categorized
-        load(categorized)
+        load(categorized, SKIP_RECONCILE_BOOL)
 
 
     # Main DAG flow
