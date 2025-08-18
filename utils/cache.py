@@ -18,7 +18,7 @@ def hash_url(url):
 def get_result_columns() -> list[str]:
     return [
         "url_hash", "created_at", "trimmed_page_url", "site", "page_url",
-        "content_topic", "prediction_confidence", "review_flag",
+        "zartico_category", "content_topic", "prediction_confidence", "review_flag",
         "nlp_raw_categories", "client_id", "last_accessed", "view_count"
     ]
 

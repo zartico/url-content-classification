@@ -163,6 +163,7 @@ def categorize_urls(df):
             "trimmed_page_url": trimmed_url,
             "site": site,
             "page_url": page_url,
+            "zartico_category": zartico_cat,
             "content_topic": top_cat.name,
             "prediction_confidence": top_cat.confidence,
             "review_flag": top_cat.confidence < 0.6,
@@ -170,7 +171,6 @@ def categorize_urls(df):
             "client_id": row["client_id"] if "client_id" in df.columns else None,
             "last_accessed": now_ts,
             "view_count": vc,
-            "zartico_category": zartico_cat,
         })
 
         # small post-call jitter

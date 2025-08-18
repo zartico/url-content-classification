@@ -161,6 +161,11 @@ def load_data(df: pd.DataFrame, *, skip_reconcile: bool = False):
     ]
     _ensure_staging_exists(client, staging_schema)
 
+    # Stage only if we actually have rows
+    if len(df_ok) == 0:
+        print("[LOAD] Nothing to stage.")
+        return
+
     # 1) Stage with WRITE_TRUNCATE
     client.load_table_from_dataframe(
         df_ok,
