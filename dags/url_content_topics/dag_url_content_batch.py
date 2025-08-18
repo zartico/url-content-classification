@@ -30,7 +30,7 @@ from utils.web_fetch import fetch_all_pages, extract_visible_text
 from src.categorize import categorize_urls
 from src.load import load_data
 
-NUM_BATCHES_TARGET = 2000
+NUM_BATCHES_TARGET = 1000
 
 # Use the GCS bucket configured in Airflow Variables
 TEMP_BUCKET = Variable.get("TEMP_GCS_BUCKET")  # e.g. non-codecs-prod-airflow/data/tmp/spark_staging
