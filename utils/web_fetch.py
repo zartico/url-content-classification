@@ -4,13 +4,14 @@ import asyncio
 import random
 import requests
 from bs4 import BeautifulSoup
+from bs4.builder import ParserRejectedMarkup
 
 import os, subprocess, time
 from pathlib import Path
 import fcntl  # Linux-only; Composer workers are Linux
 from playwright.async_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
-from .utils import _should_skip_blocked, _backoff_delay, _retry_after_seconds, _looks_internal_for_pw
+from .utils import _should_skip_blocked, _backoff_delay, _retry_after_seconds, _looks_internal_for_pw, _to_text, _is_probably_html
 
 HEADERS = {
     "User-Agent": (
@@ -20,6 +21,7 @@ HEADERS = {
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.5",
+    "Accept-Encoding": "gzip, deflate",
     "Referer": "https://www.google.com/",
     "DNT": "1",  # Do Not Track
     "Connection": "keep-alive",
@@ -357,8 +359,19 @@ async def fetch_all_pages(urls: list[str], max_concurrent: int, limit_per_host: 
 def extract_visible_text(html: str) -> str:
     if not html or (isinstance(html, str) and html.startswith("[ERROR]")):
         return ""
-    soup = BeautifulSoup(html, "html.parser")
-    # Remove scripts and styles
-    for tag in soup(["script", "style", "noscript"]):
-        tag.decompose()
-    return soup.get_text(separator=" ", strip=True)
+
+    text = _to_text(html)
+    if not text or not _is_probably_html(text):
+        return ""
+    
+    try: 
+        soup = BeautifulSoup(html, "html.parser")
+        # Remove scripts and styles
+        for tag in soup(["script", "style", "noscript"]):
+            tag.decompose()
+        return soup.get_text(separator=" ", strip=True)
+    # If BeautifulSoup fails to parse, return empty
+    except (ParserRejectedMarkup, AssertionError):
+        return "" 
+    except Exception:
+        return ""  # Any other parsing error, return empty
