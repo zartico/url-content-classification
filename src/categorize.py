@@ -13,9 +13,9 @@ import pandas as pd
 import random, time
 from time import monotonic as _monotonic
 
-# -----------------------------
-# Tunables for Throttling and Retries
-# -----------------------------
+
+#----- Tunables for Throttling/Retries -----
+
 RPS_PER_TASK = 5.0                # ~5 requests/second per categorize task
 JITTER_FRACTION = 0.10            # +/-10% jitter on pacing sleeps
 POST_CALL_JITTER_MAX_SEC = 0.05   # up to 50ms small jitter after each call
@@ -89,7 +89,8 @@ def classify_text(raw_html, client):
         return None
     
 
-# Main categorization function
+#----- Main Categorization Function -----
+
 def categorize_urls(df):
     client = bigquery.Client(project=PROJECT_ID)
 

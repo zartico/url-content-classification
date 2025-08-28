@@ -11,6 +11,8 @@ import os
 STAGING_INCOMING = f"{PROJECT_ID}.{BQ_DATASET_ID}.staging_categorized_incoming"
 FINAL_TABLE      = f"{PROJECT_ID}.{BQ_DATASET_ID}.{BQ_TABLE_ID}"
 
+#---- Schema and Table Management ----
+
 def ensure_dataset_and_table_exist():
     """
     Ensure the BigQuery dataset and table exist, creating them if necessary. 
@@ -26,7 +28,7 @@ def ensure_dataset_and_table_exist():
         client.get_dataset(dataset_ref)
     except NotFound:
         print(f"[ERROR] Dataset {BQ_DATASET_ID} does not exist. Please ask your admin to create it.")
-        return None  # Exit early
+        return None 
 
     # Check/create table
     try:
@@ -63,6 +65,8 @@ def _ensure_staging_exists(client: bigquery.Client, schema: list[bigquery.Schema
     except NotFound:
         client.create_table(bigquery.Table(STAGING_INCOMING, schema=schema))
         print(f"[INFO] Created staging table {STAGING_INCOMING}.")
+
+#---- Reconciliation of View Counts ----
 
 def _iter_chunks(seq, size):
     for i in range(0, len(seq), size):
@@ -108,6 +112,8 @@ def _reconcile_lifetime_view_counts_for_hashes(client: bigquery.Client, hashes: 
         job.result()
         total += len(chunk)
     print(f"[LOAD] Lifetime view_count reconciled for {total} urls.")
+
+#---- Main Load Function ----
 
 def load_data(df: pd.DataFrame, *, skip_reconcile: bool = False):
     """

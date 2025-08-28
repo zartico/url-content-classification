@@ -2,6 +2,8 @@ from airflow.decorators import dag, task, task_group
 from airflow.utils.dates import days_ago
 from airflow.utils.trigger_rule import TriggerRule
 from airflow.models import Variable
+from airflow.models.param import Param
+from airflow.operators.python import get_current_context
 
 from pyspark.sql import functions as F
 from pyspark.sql import types as T
@@ -9,12 +11,12 @@ from pyspark.sql.window import Window
 
 from google.cloud import bigquery
 from datetime import timedelta, datetime, timezone
+from math import ceil
 import pandas as pd
 import asyncio
 import uuid
-import math
+import pytz
 import sys
-import os
 
 sys.path.append('/home/airflow/gcs/data/url_content_topics')
 sys.path.append('/home/airflow/gcs/data/url_content_topics/src')
@@ -30,14 +32,49 @@ from utils.web_fetch import fetch_all_pages, extract_visible_text
 from src.categorize import categorize_urls
 from src.load import load_data
 
-NUM_BATCHES_TARGET = 1000
-
 # Use the GCS bucket configured in Airflow Variables
 TEMP_BUCKET = Variable.get("TEMP_GCS_BUCKET")  # e.g. non-codecs-prod-airflow/data/tmp/spark_staging
 URL_CONTENT_SKIP_RECONCILE = Variable.get("URL_CONTENT_SKIP_RECONCILE", default_var = "0") # lifetime view_count from GA4 table
-SKIP_RECONCILE_BOOL = (URL_CONTENT_SKIP_RECONCILE == "1")
+SKIP_RECONCILE_BOOL_DEFAULT = (URL_CONTENT_SKIP_RECONCILE == "1")
 
+# --- DAG PARAMS ---
+default_end = datetime.now().astimezone(pytz.timezone('US/Central'))
+default_start = datetime.now().astimezone(pytz.timezone('US/Central')) - timedelta(days=10)
 
+default_end = default_end.strftime("%Y-%m-%d")
+default_start = default_start.strftime("%Y-%m-%d")
+
+dag_params = {
+    "start_date": Param(
+        str(default_start), 
+        title="Start Date (YYYY-MM-DD)", 
+        type="string", 
+        format="date"
+    ),
+    "end_date": Param(
+        str(default_end), 
+        title="End Date (YYYY-MM-DD)", 
+        type="string", 
+        format="date"
+    ),
+    "batch_size": Param(
+        1000,          
+        title="Batch size (URLs per batch)", 
+        type="integer"
+    ),
+    "max_batches_cap": Param(
+        900,      
+        title="Max batches cap (safety)", 
+        type="integer"
+    ),
+    "skip_reconcile": Param(
+        False, 
+        title="Skip Reconcile in Load", 
+        type="boolean"
+    ),
+}
+
+# --- SPARK SETUP ---
 def create_spark_session():
     from pyspark.sql import SparkSession
 
@@ -70,13 +107,47 @@ def create_spark_session():
     return spark
 
 @dag(
-    schedule_interval=None,
+    schedule_interval="30 20 * * *", 
     start_date=days_ago(1),
     catchup=False,
     tags=["url-content"],
     max_active_runs=1,
+    params=dag_params,
+    render_template_as_native_obj=True,
 )
-def url_content_backfill():
+def url_content_daily():
+
+    @task(task_id="resolve_config", multiple_outputs=True)
+    def resolve_config(params: dict):
+        # Read runtime context
+        ctx = get_current_context()
+        params = dict(ctx.get("params", {}))                      # values from DAG params (UI defaults)
+        conf = dict((ctx.get("dag_run").conf or {}))              # per-run overrides (Trigger DAG w/ config)
+
+        # Dynamic fallbacks
+        central = pytz.timezone('US/Central')
+        today = datetime.now().astimezone(central).date()
+        fallback_end = today.strftime("%Y-%m-%d")
+        fallback_start = (today - timedelta(days=10)).strftime("%Y-%m-%d")
+
+        # Getters: dag_run.conf overrides params and overrides runtime fallback
+        def get_val(key, default):
+            return conf.get(key, params.get(key, default))
+
+        start = get_val("start_date", fallback_start)
+        end   = get_val("end_date",   fallback_end)
+        bsz   = int(get_val("batch_size", 1000))          
+        cap   = int(get_val("max_batches_cap", 900))
+        skip  = bool(get_val("skip_reconcile", SKIP_RECONCILE_BOOL_DEFAULT))
+
+        return {
+            "start_date": start, 
+            "end_date": end, 
+            "batch_size": bsz,
+            "max_batches_cap": cap, 
+            "skip_reconcile": skip
+        }
+
     @task(task_id="make_run_id", retries=3, retry_delay=timedelta(minutes=3))
     def make_run_id() -> str:
         # Stable id for this DAG run (readable + unique)
@@ -84,20 +155,22 @@ def url_content_backfill():
         return f"{ts}_{uuid.uuid4().hex[:8]}"
 
     @task(task_id="extract_data", retries=3, retry_delay=timedelta(minutes=3), pool = "spark")
-    def extract():
+    def extract(cfg: dict):
         print("[EXTRACT] Starting data extraction from BigQuery")
         spark = create_spark_session()
-        # Add date filter for after backfill
-        raw_df = extract_data(spark, PROJECT_ID, GA4_DATASET_ID, GA4_TABLE_ID)
+        
+        raw_df = extract_data(
+            spark,
+            PROJECT_ID, 
+            GA4_DATASET_ID, 
+            GA4_TABLE_ID,
+            date_start=cfg["start_date"],
+            date_end=cfg["end_date"]
+        )
+
         temp_path = "/home/airflow/gcs/data/url_content_topics/tmp/raw.parquet"
         raw_df.write.mode("overwrite").parquet(temp_path)
         print(f"[EXTRACT] Extracted {raw_df.count()} distinct from BigQuery")
-        # Sanity check
-        max_hits_row = raw_df.orderBy(F.col("access_hits").desc()).limit(1).collect()
-        if max_hits_row:
-            top = max_hits_row[0]
-            print(f"[EXTRACT] Highest access_hits: {top['access_hits']} "
-                f"for url_hash={top['url_hash']} (site={top['site']}, trimmed_page_url={top['trimmed_page_url']})")
 
         spark.stop()
         return temp_path
@@ -106,19 +179,13 @@ def url_content_backfill():
     def transform(raw_path):
         print("[TRANSFORM] Starting data transformation")
         spark = create_spark_session()
+
         raw_df = spark.read.parquet(raw_path)
         print(f"[TRANSFORM] Raw DataFrame loaded with {raw_df.count()} rows")
         transformed_df = transform_data(raw_df)
         print(f"[TRANSFORM] Transformed/Cleaned {transformed_df.count()} rows")
         temp_path = "/home/airflow/gcs/data/url_content_topics/tmp/transformed.parquet"
         transformed_df.write.mode("overwrite").parquet(temp_path)
-
-        # Sanity check
-        max_hits_row = transformed_df.orderBy(F.col("access_hits").desc()).limit(1).collect()
-        if max_hits_row:
-            top = max_hits_row[0]
-            print(f"[TRANSFORM] Highest access_hits: {top['access_hits']} "
-                f"for url_hash={top['url_hash']} (site={top['site']}, trimmed_page_url={top['trimmed_page_url']})")
 
         spark.stop()
         return temp_path
@@ -146,13 +213,19 @@ def url_content_backfill():
         return temp_path
     
     @task(task_id="stage_batches_bq", retries=3, retry_delay=timedelta(minutes=3), pool="spark")
-    def stage_batches_to_bq(uncached_parquet_path: str, num_batches_target: int, run_id: str) -> list[str]:
+    def stage_batches_to_bq(uncached_parquet_path: str, batch_size: int, max_batches_cap: int, run_id: str) -> list[str]:
         """
-        1) Read uncached parquet (must include: url_hash, trimmed_page_url, site, page_url, client_id, access_hits).
-        2) Assign deterministic batches of ~batch_size using row_number() over url_hash ordering.
-        3) Write to a per-run temp BQ table.
-        4) MERGE insert-if-missing into staging_url_info keyed by (run_id, url_hash).
-        5) Return the list of batch_ids that were staged.
+        Stage uncached URLs into batches for downstream processing.
+
+        Steps:
+        1) Read uncached parquet (must include: url_hash, trimmed_page_url, site, page_url, client_id, access_hits)
+        2) Compute batches by a fixed batch_size (# of URLs per batch, default around 1k URLs)
+            - If the resulting number of batches would exceed max_batches_cap,
+            automatically increase batch_size so the cap is respected
+        3) Write staged candidates to a per-run temporary BQ table
+        4) MERGE into staging_url_info (upsert by run_id + url_hash)
+        5) Drop temp table
+        6) Return list of batch_ids
         """
         spark = create_spark_session()
 
@@ -165,12 +238,20 @@ def url_content_backfill():
             raise ValueError(f"[STAGE] Missing required columns in uncached dataset: {missing}")
 
         uncached_count = df.count()
-        if num_batches_target and num_batches_target > 0:
-            from math import ceil
-            batch_size = max(1, int(ceil(uncached_count / num_batches_target)))
-            print(f"[STAGE] Dynamic: uncached={uncached_count}, target_batches={num_batches_target} -> batch_size={batch_size}")
+        if uncached_count == 0:
+            print("[STAGE] No uncached rows; nothing to stage.")
+            spark.stop()
+            return []
+
+        # Compute batches by size, then enforce cap
+        requested_batches = ceil(uncached_count / max(1, batch_size))
+        if requested_batches > max_batches_cap:
+            # Inflate batch_size to respect the cap
+            batch_size = ceil(uncached_count / max_batches_cap)
+            print(f"[STAGE] requested_batches={requested_batches} > cap={max_batches_cap}; "
+                f"inflating batch_size to {batch_size}")
         else:
-            raise ValueError("[STAGE] Provide either batch_size or num_batches_target")
+            print(f"[STAGE] Using requested batch_size={batch_size} (batches≈{requested_batches})")
 
         # Deterministic row numbers → batch_index
         w = Window.orderBy(F.col("url_hash").asc())
@@ -179,7 +260,7 @@ def url_content_backfill():
                 .withColumn("batch_index", F.floor((F.col("row_num") - F.lit(1)) / F.lit(batch_size)))
                 )
 
-        # Build (batch_index -> batch_id) mapping on driver; small cardinality so collect is fine
+        # Build (batch_index -> batch_id) mapping 
         batch_indices = [r.batch_index for r in df_idx.select("batch_index").distinct().collect()]
         batch_map_rows = [(int(i), f"batch_{i}_{run_id}") for i in sorted(batch_indices)]
         batch_map_df = spark.createDataFrame(batch_map_rows, schema=T.StructType([
@@ -241,7 +322,7 @@ def url_content_backfill():
         return batch_ids
 
     @task_group(group_id="process_batch")
-    def process_batch_group(batch_id: str):
+    def process_batch_group(batch_id: str, skip_reconcile: bool):
         """
         Per-batch sub-DAG: fetch -> categorize -> load
         Using a TaskGroup lets batches complete independently under resource pressure.
@@ -353,25 +434,29 @@ def url_content_backfill():
 
         fetched = fetch_urls(batch_id)
         categorized = categorize(batch_id)
-        # Categorize waits for corresponding fetch to complete
-        fetched >> categorized
-        load(categorized, SKIP_RECONCILE_BOOL)
+        loaded = load(categorized, skip_reconcile)
+
+        fetched >> categorized >> loaded
 
 
-    # Main DAG flow
+    # --- MAIN DAG FLOW ---
+    cfg = resolve_config()
     run_id = make_run_id()
-    raw_path = extract()
+
+    raw_path = extract(cfg)
     transformed_path = transform(raw_path)
     new_records = filter_cached_urls(transformed_path, run_id=run_id)
     
     batch_ids = stage_batches_to_bq(
         uncached_parquet_path=new_records,
-        num_batches_target=NUM_BATCHES_TARGET,            # dynamic batching
+        batch_size=cfg["batch_size"],           
+        max_batches_cap=cfg["max_batches_cap"],  
         run_id=run_id,
     )
 
-    # Each mapped group will run independently: fetch -> categorize -> load
-    process_batch_group.expand(batch_id=batch_ids)
+    process_batch_group.partial(skip_reconcile=cfg["skip_reconcile"]).expand(
+        batch_id=batch_ids
+    )
 
-url_content_backfill()
+url_content_daily()
 

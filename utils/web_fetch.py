@@ -43,43 +43,7 @@ _AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(
 )
 _DNS_TTL_SECS = 300
 
-def ensure_playwright_browsers_installed() -> bool:
-    """
-    Ensure Chromium is installed for Playwright on this worker.
-    Uses a file lock so only one process downloads at a time.
-    Returns True if browsers are installed (now or already), else False.
-    """
-    try:
-        if _INSTALL_SENTINEL.exists():
-            return True
-
-        _INSTALL_SENTINEL.parent.mkdir(parents=True, exist_ok=True)
-        with open(_INSTALL_LOCK, "w") as lf:
-            # Exclusive lock so concurrent tasks don't both download
-            fcntl.flock(lf, fcntl.LOCK_EX)
-            # Another process may have finished while we waited
-            if _INSTALL_SENTINEL.exists():
-                fcntl.flock(lf, fcntl.LOCK_UN)
-                return True
-
-            print("[PLAYWRIGHT-INSTALL] Downloading Chromium to", BROWSERS_PATH)
-            # Do NOT use --with-deps inside Composer; not allowed to apt-get
-            subprocess.run(
-                ["python", "-m", "playwright", "install", "chromium"],
-                check=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-            )
-            _INSTALL_SENTINEL.touch()
-            fcntl.flock(lf, fcntl.LOCK_UN)
-            print("[PLAYWRIGHT-INSTALL] Completed")
-            return True
-    except subprocess.CalledProcessError as e:
-        print("[PLAYWRIGHT-INSTALL-ERROR] Installer failed:\n", e.stdout)
-    except Exception as e:
-        print(f"[PLAYWRIGHT-INSTALL-ERROR] {e}")
-    return False
+# ------ AIOHTTP Fetch ------
 
 async def fetch_aiohttp(session, url: str) -> tuple[str, str | None]:
     await asyncio.sleep(random.uniform(0.05, 0.25))  # jitter
@@ -93,23 +57,6 @@ async def fetch_aiohttp(session, url: str) -> tuple[str, str | None]:
                 if status in (401, 404, 410):
                     print(f"[AIOHTTP] {url} - {status} (terminal skip)")
                     return url, f"[SKIP:{status}]"
-
-                # Blocked/unauthorized heuristics (read a small sample only)
-                # if status in (401, 403):
-                #     sample = await resp.content.read(16384)
-                #     enc = resp.charset or "utf-8"
-                #     try:
-                #         text_sample = sample.decode(enc, errors="ignore")
-                #     except Exception:
-                #         text_sample = sample.decode("utf-8", errors="ignore")
-
-                #     if _should_skip_blocked(text_sample, len(sample)):
-                #         print(f"[AIOHTTP] {url} - {status} (blocked; skip)")
-                #         return url, "[SKIP:403_BLOCKED]"
-                #     # If it looks like a real page despite 403, keep full body
-                #     body = text_sample + (await resp.text())[len(text_sample):]
-                #     print(f"[AIOHTTP] {url} - {status} (keeping {len(body)} chars)")
-                #     return url, body
 
                 # Success
                 if 200 <= status < 300:
@@ -158,6 +105,7 @@ async def fetch_aiohttp(session, url: str) -> tuple[str, str | None]:
             print(f"[AIOHTTP-ERROR] {url}: {e.__class__.__name__}: {e} (giving up)")
             return url, None
 
+#------ Requests Fetch ------
 
 def fetch_requests(url: str) -> tuple[str, str | None]:
     try:
@@ -167,14 +115,6 @@ def fetch_requests(url: str) -> tuple[str, str | None]:
         if status in (401, 404, 410):
             print(f"[REQUESTS] {url} - {status} (terminal skip)")
             return url, f"[SKIP:{status}]"
-
-        # if status in (401, 403):
-        #     txt = r.text
-        #     if _should_skip_blocked(txt[:16000], len(txt)):
-        #         print(f"[REQUESTS] {url} - {status} (blocked; skip)")
-        #         return url, "[SKIP:403_BLOCKED]"
-        #     print(f"[REQUESTS] {url} - {status} (keeping {len(txt)} chars)")
-        #     return url, txt
 
         if 200 <= status < 300:
             print(f"[REQUESTS] {url} - {status} ({len(r.text)} chars)")
@@ -203,8 +143,47 @@ def fetch_requests(url: str) -> tuple[str, str | None]:
         print(f"[REQUESTS-ERROR] {url}: {e}")
         return url, None
 
+# ------ Playwright Utilities/Fetch -----
 
 PLAYWRIGHT_ENABLED = True  # circuit-breaker to avoid repeated failures
+
+def ensure_playwright_browsers_installed() -> bool:
+    """
+    Ensure Chromium is installed for Playwright on this worker.
+    Uses a file lock so only one process downloads at a time.
+    Returns True if browsers are installed (now or already), else False.
+    """
+    try:
+        if _INSTALL_SENTINEL.exists():
+            return True
+
+        _INSTALL_SENTINEL.parent.mkdir(parents=True, exist_ok=True)
+        with open(_INSTALL_LOCK, "w") as lf:
+            # Exclusive lock so concurrent tasks don't both download
+            fcntl.flock(lf, fcntl.LOCK_EX)
+            # Another process may have finished while we waited
+            if _INSTALL_SENTINEL.exists():
+                fcntl.flock(lf, fcntl.LOCK_UN)
+                return True
+
+            print("[PLAYWRIGHT-INSTALL] Downloading Chromium to", BROWSERS_PATH)
+            # Do NOT use --with-deps inside Composer; not allowed to apt-get
+            subprocess.run(
+                ["python", "-m", "playwright", "install", "chromium"],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            _INSTALL_SENTINEL.touch()
+            fcntl.flock(lf, fcntl.LOCK_UN)
+            print("[PLAYWRIGHT-INSTALL] Completed")
+            return True
+    except subprocess.CalledProcessError as e:
+        print("[PLAYWRIGHT-INSTALL-ERROR] Installer failed:\n", e.stdout)
+    except Exception as e:
+        print(f"[PLAYWRIGHT-INSTALL-ERROR] {e}")
+    return False
 
 def _is_launch_error(msg: str) -> bool:
     # Messages that imply browser binaries missing / launch impossible
@@ -217,7 +196,6 @@ async def fetch_playwright(url: str) -> tuple[str, str | None]:
         return url, None
 
     async def _try_launch():
-        from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
         browser = None
         try:
             async with async_playwright() as p:
@@ -239,14 +217,7 @@ async def fetch_playwright(url: str) -> tuple[str, str | None]:
                 html = await page.content()
                 print(f"[PLAYWRIGHT] {url} - {status if status is not None else '?'}")
                 return html
-                # browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
-                # context = await browser.new_context()
-                # page = await context.new_page()
-                # response = await page.goto(url, timeout=15000)
-                # content = await page.content()
-                # status = response.status if response else "?"
-                # print(f"[PLAYWRIGHT] {url} - {status}")
-                # return content
+
         except PlaywrightTimeoutError:
             print(f"[PLAYWRIGHT-TIMEOUT] {url}")
             return None
@@ -287,6 +258,8 @@ async def fetch_playwright(url: str) -> tuple[str, str | None]:
     PLAYWRIGHT_ENABLED = False
     print("[PLAYWRIGHT-DISABLED] Could not launch even after install; disabling fallback.")
     return url, None
+
+#------ Combined Fetch -----
 
 async def fetch_all_pages(urls: list[str], max_concurrent: int, limit_per_host: int) -> dict[str, str]:
     results = {}
@@ -356,6 +329,8 @@ async def fetch_all_pages(urls: list[str], max_concurrent: int, limit_per_host: 
     print(f"[FETCH] Completed. Fetched content for {len(results)} URLs")
     return results
 
+# ------ HTML/Text Extraction ------
+
 def extract_visible_text(html: str) -> str:
     if not html or (isinstance(html, str) and html.startswith("[ERROR]")):
         return ""
@@ -374,4 +349,4 @@ def extract_visible_text(html: str) -> str:
     except (ParserRejectedMarkup, AssertionError):
         return "" 
     except Exception:
-        return ""  # Any other parsing error, return empty
+        return ""  
