@@ -81,35 +81,40 @@ def _reconcile_lifetime_view_counts_for_hashes(client: bigquery.Client, hashes: 
         return
     total = 0
     for chunk in _iter_chunks(hashes, chunk_size):
-        sql = f"""
-        WITH target_hashes AS (
-          SELECT url_hash FROM UNNEST(@hashes) AS url_hash
-        ),
-        lifetime AS (
-          SELECT
+        # 1. Write the CTE result to a temp table
+        temp_table = f"{PROJECT_ID}.{BQ_DATASET_ID}.tmp_lifetime_hits"
+        sql_cte = f"""
+        CREATE OR REPLACE TABLE `{temp_table}` AS
+        SELECT
             TO_HEX(SHA256(CAST(LOWER(TRIM(trimmed_page_url)) AS STRING))) AS url_hash,
             COUNT(*) AS lifetime_hits
-          FROM `{PROJECT_ID}.{GA4_DATASET_ID}.{GA4_TABLE_ID}`
-          WHERE trimmed_page_url IS NOT NULL
+        FROM `{PROJECT_ID}.{GA4_DATASET_ID}.{GA4_TABLE_ID}`
+        WHERE trimmed_page_url IS NOT NULL
             AND site IS NOT NULL
             AND client_id NOT LIKE '%Demo%'
-            AND TO_HEX(SHA256(CAST(LOWER(TRIM(trimmed_page_url)) AS STRING))) IN (SELECT url_hash FROM target_hashes)
-          GROUP BY url_hash
-        )
+            AND TO_HEX(SHA256(CAST(LOWER(TRIM(trimmed_page_url)) AS STRING))) IN UNNEST(@hashes)
+        GROUP BY url_hash
+        """
+        client.query(
+            sql_cte,
+            job_config=bigquery.QueryJobConfig(
+                query_parameters=[ArrayQueryParameter("hashes", "STRING", chunk)]
+            ),
+        ).result()
+
+        # 2. Run MERGE using the temp table
+        merge_sql = f"""
         MERGE `{FINAL_TABLE}` T
-        USING lifetime L
+        USING `{temp_table}` L
         ON T.url_hash = L.url_hash
         WHEN MATCHED THEN UPDATE SET
           T.view_count    = L.lifetime_hits,
           T.last_accessed = CURRENT_TIMESTAMP()
         """
-        job = client.query(
-            sql,
-            job_config=bigquery.QueryJobConfig(
-                query_parameters=[ArrayQueryParameter("hashes", "STRING", chunk)]
-            ),
-        )
-        job.result()
+        client.query(merge_sql).result()
+
+        # 3. Drop temp table
+        client.delete_table(temp_table, not_found_ok=True)
         total += len(chunk)
     print(f"[LOAD] Lifetime view_count reconciled for {total} urls.")
 
